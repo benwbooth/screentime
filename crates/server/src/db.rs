@@ -284,6 +284,12 @@ pub async fn create_request(
     reason: Option<&str>,
 ) -> Result<(RequestRow, String)> {
     let token = new_token();
+    // One open request per kid: a new one replaces any still unanswered.
+    sqlx::query("UPDATE time_requests SET status = 'replaced', resolved_at = ? WHERE user_id = ? AND status = 'pending'")
+        .bind(now())
+        .bind(user)
+        .execute(db)
+        .await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO time_requests (user_id, host, requested_minutes, reason, action_token_hash, created_at)
          VALUES (?, ?, ?, ?, ?, ?) RETURNING id",

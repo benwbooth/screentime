@@ -100,6 +100,9 @@ pub struct Payload {
     pub body: String,
     /// Opened when the notification itself is tapped.
     pub url: String,
+    /// Notifications with the same tag replace each other: one per kid's request.
+    #[serde(default)]
+    pub tag: Option<String>,
     /// Buttons; the service worker POSTs to the button's URL. Android shows up to two.
     pub actions: Vec<PayloadAction>,
 }
@@ -123,6 +126,7 @@ pub fn request_payload(row: &RequestRow, page_url: String, quick: &[(u32, String
         title: format!("{} wants more screen time", row.username),
         body,
         url: page_url,
+        tag: Some(format!("request-{}", row.username)),
         actions: quick.iter().map(|(m, url)| PayloadAction { title: format!("+{m} min"), url: url.clone() }).collect(),
     }
 }

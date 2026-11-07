@@ -4,6 +4,7 @@
 use crate::error::{AppError, AppResult};
 use crate::{AppState, db};
 use axum::extract::{Form, Path, State};
+use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::{get, post};
 use axum::Router;
@@ -89,27 +90,32 @@ async fn page(State(s): State<AppState>, Path((id, token)): Path<(i64, String)>)
 fn resolved_text(r: &db::RequestRow) -> String {
     match (r.status.as_str(), r.granted_minutes) {
         ("granted", Some(m)) => format!("<p>Added {m} minutes for {}.</p>", escape(&r.username)),
+        ("replaced", _) => format!("<p>{} asked again since; answer the newer request.</p>", escape(&r.username)),
         _ => format!("<p>Request declined for {}.</p>", escape(&r.username)),
     }
 }
 
-async fn resolve(s: &AppState, id: i64, token: &str, minutes: u32) -> AppResult<Html<String>> {
+async fn resolve(s: &AppState, id: i64, token: &str, minutes: u32) -> AppResult<(StatusCode, Html<String>)> {
     if minutes > 24 * 60 {
         return Err(AppError::BadRequest("at most 24 hours".into()));
     }
     let existing = load(s, id, token).await?;
     let today = Local::now().date_naive();
-    let body = match db::resolve_request(&s.db, id, minutes, today).await? {
+    // A notification button that didn't add anything says so (409), instead of "Done".
+    let (status, body) = match db::resolve_request(&s.db, id, minutes, today).await? {
         Some(r) => {
             tracing::info!(id, user = %r.username, minutes, "request answered from link");
-            resolved_text(&r)
+            (StatusCode::OK, resolved_text(&r))
         }
-        None => format!("<p>This request was already answered.</p>{}", resolved_text(&existing)),
+        None => (StatusCode::CONFLICT, format!("<p>This request was already answered.</p>{}", resolved_text(&existing))),
     };
-    Ok(layout("Time request", &body))
+    Ok((status, layout("Time request", &body)))
 }
 
-async fn act(State(s): State<AppState>, Path((id, token, minutes)): Path<(i64, String, u32)>) -> AppResult<Html<String>> {
+async fn act(
+    State(s): State<AppState>,
+    Path((id, token, minutes)): Path<(i64, String, u32)>,
+) -> AppResult<(StatusCode, Html<String>)> {
     resolve(&s, id, &token, minutes).await
 }
 
@@ -122,6 +128,6 @@ async fn act_custom(
     State(s): State<AppState>,
     Path((id, token)): Path<(i64, String)>,
     Form(f): Form<CustomForm>,
-) -> AppResult<Html<String>> {
+) -> AppResult<(StatusCode, Html<String>)> {
     resolve(&s, id, &token, f.minutes).await
 }

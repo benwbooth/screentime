@@ -58,6 +58,7 @@ async fn usage(State(s): State<AppState>, client: Client, Json(report): Json<Usa
             title: format!("{name} got {added} more minutes on {}", client.hostname),
             body: "Approved at the computer with \u{201c}My parent is here\u{201d}. Not you? Change the parent PIN.".into(),
             url: format!("{}/", s.config.public_url),
+            tag: None,
             actions: Vec::new(),
         };
         let (notifier, db) = (s.notifier.clone(), s.db.clone());

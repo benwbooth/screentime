@@ -11,7 +11,9 @@ self.addEventListener("push", (event) => {
     body: data.body || "",
     icon: "/icon-192.png",
     badge: "/icon-192.png",
-    tag: data.url || "screentime",
+    // One notification per kid's request: a newer request replaces the older one, and still alerts.
+    tag: data.tag || data.url || "screentime",
+    renotify: true,
     requireInteraction: true,
     actions,
     data,

@@ -399,6 +399,7 @@ async fn push_test(State(s): State<AppState>, _: Admin) -> AppResult<Json<Delive
         title: "Notifications are working".into(),
         body: "You'll get a notification like this when someone asks for more time.".into(),
         url: format!("{}/", s.config.public_url),
+        tag: None,
         actions: Vec::new(),
     };
     Ok(Json(Delivered { delivered: s.notifier.send_push(&s.db, &payload).await? }))

@@ -667,3 +667,23 @@ async fn time_left_stops_at_zero() {
     let overview: Value = serde_json::from_str(&s.call("GET", "/api/overview", Some(me.as_str()), None).await.2).unwrap();
     assert_eq!(overview["users"][0]["time_left"], 15);
 }
+
+#[tokio::test]
+async fn a_new_request_replaces_the_kids_older_one() {
+    let s = server(with_password()).await;
+    let me = s.admin_cookie().await;
+    let kid = db::ensure_user(&s.state.db, "kid", 0).await.unwrap();
+    let other = db::ensure_user(&s.state.db, "other", 0).await.unwrap();
+    let (old, old_token) = db::create_request(&s.state.db, kid, "pc1", None, None).await.unwrap();
+    db::create_request(&s.state.db, other, "pc1", None, None).await.unwrap();
+    let (new, _) = db::create_request(&s.state.db, kid, "pc2", None, None).await.unwrap();
+
+    let overview: Value = serde_json::from_str(&s.call("GET", "/api/overview", Some(me.as_str()), None).await.2).unwrap();
+    let ids: Vec<i64> = overview["pending_requests"].as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()).collect();
+    assert!(ids.contains(&new.id) && !ids.contains(&old.id) && ids.len() == 2, "{ids:?}");
+    // The replaced one's notification buttons no longer add time.
+    assert_eq!(s.call("POST", &format!("/act/{}/{old_token}/30", old.id), None, None).await.0, StatusCode::CONFLICT);
+    assert_eq!(db::bonus(&s.state.db, kid, Local::now().date_naive()).await.unwrap(), 0);
+    let tag = screentime_server::push::request_payload(&new, String::new(), &[]).tag;
+    assert_eq!(tag.as_deref(), Some("request-kid"));
+}
