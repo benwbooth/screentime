@@ -198,6 +198,43 @@ pub async fn record_usage(db: &SqlitePool, user: i64, host: &str, report: &Usage
         .bind(added.min(60))
         .execute(&mut *tx)
         .await?;
+        // Minutes arriving within a few minutes of the last ones continue that session.
+        let now_utc = Utc::now();
+        let recent = (now_utc - chrono::Duration::minutes(SESSION_GAP_MINUTES)).to_rfc3339();
+        let open: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM play_sessions WHERE user_id = ? AND host = ? AND day = ? AND ended_at >= ?
+             ORDER BY ended_at DESC LIMIT 1",
+        )
+        .bind(user)
+        .bind(host)
+        .bind(report.day)
+        .bind(&recent)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match open {
+            Some(id) => {
+                sqlx::query("UPDATE play_sessions SET ended_at = ?, minutes = minutes + ? WHERE id = ?")
+                    .bind(now_utc.to_rfc3339())
+                    .bind(added)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            None => {
+                let started = now_utc - chrono::Duration::minutes(added.min(60) as i64);
+                sqlx::query(
+                    "INSERT INTO play_sessions (user_id, host, day, started_at, ended_at, minutes) VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(user)
+                .bind(host)
+                .bind(report.day)
+                .bind(started.to_rfc3339())
+                .bind(now_utc.to_rfc3339())
+                .bind(added)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
     }
     sqlx::query(
         "INSERT INTO usage (user_id, host, day, active_minutes, local_bonus_minutes, updated_at)
@@ -219,6 +256,9 @@ pub async fn record_usage(db: &SqlitePool, user: i64, host: &str, report: &Usage
     Ok(())
 }
 
+/// A pause longer than this between minutes of use starts a new session.
+const SESSION_GAP_MINUTES: i64 = 3;
+
 /// One day of a kid's use across all computers: the total and how it spread over the hours.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DayHistory {
@@ -226,13 +266,23 @@ pub struct DayHistory {
     pub minutes: u32,
     /// Minutes in each hour, midnight first; all zero for days before hours were recorded.
     pub hours: [u32; 24],
+    /// Stretches of continuous use, earliest first; empty for days before they were recorded.
+    pub sessions: Vec<PlaySession>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct PlaySession {
+    pub host: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub minutes: i64,
 }
 
 /// The kid's last `days` days, oldest first, including days with no use.
 pub async fn history(db: &SqlitePool, user: i64, today: NaiveDate, days: u32) -> Result<Vec<DayHistory>> {
     let first = today - chrono::Duration::days(days as i64 - 1);
     let mut out: Vec<DayHistory> = (0..days)
-        .map(|i| DayHistory { day: first + chrono::Duration::days(i as i64), minutes: 0, hours: [0; 24] })
+        .map(|i| DayHistory { day: first + chrono::Duration::days(i as i64), minutes: 0, hours: [0; 24], sessions: Vec::new() })
         .collect();
     let totals: Vec<(NaiveDate, i64)> =
         sqlx::query_as("SELECT day, SUM(active_minutes) FROM usage WHERE user_id = ? AND day >= ? AND day <= ? GROUP BY day")
@@ -259,6 +309,20 @@ pub async fn history(db: &SqlitePool, user: i64, today: NaiveDate, days: u32) ->
             if h < 24 {
                 d.hours[h] = minutes as u32;
             }
+        }
+    }
+    let sessions: Vec<(NaiveDate, String, String, String, i64)> = sqlx::query_as(
+        "SELECT day, host, started_at, ended_at, minutes FROM play_sessions
+         WHERE user_id = ? AND day >= ? AND day <= ? ORDER BY started_at",
+    )
+    .bind(user)
+    .bind(first)
+    .bind(today)
+    .fetch_all(db)
+    .await?;
+    for (day, host, started_at, ended_at, minutes) in sessions {
+        if let Some(d) = out.get_mut((day - first).num_days() as usize) {
+            d.sessions.push(PlaySession { host, started_at, ended_at, minutes });
         }
     }
     Ok(out)

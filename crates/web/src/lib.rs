@@ -773,7 +773,7 @@ fn HistoryView() -> impl IntoView {
                     {move || {
                         let k = kids.get().unwrap_or_default();
                         k.get(kid.get().min(k.len().saturating_sub(1))).cloned()
-                            .map(|kid| view! { <HistoryPanel kid=kid span=span.get() offset=offset/> })
+                            .map(|kid| view! { <HistoryPanel kid=kid span=span.get() offset=offset span_signal=span/> })
                     }}
                 }.into_any()
             }
@@ -782,7 +782,7 @@ fn HistoryView() -> impl IntoView {
 }
 
 #[component]
-fn HistoryPanel(kid: api::KidHistory, span: Span, offset: RwSignal<i32>) -> impl IntoView {
+fn HistoryPanel(kid: api::KidHistory, span: Span, offset: RwSignal<i32>, span_signal: RwSignal<Span>) -> impl IntoView {
     let today = kid.days.last().map(|d| d.day).unwrap_or_default();
     let first_day = kid.days.iter().find(|d| d.minutes > 0).map(|d| d.day).unwrap_or(today);
     let by_day: std::collections::HashMap<_, _> = kid.days.into_iter().map(|d| (d.day, d)).collect();
@@ -851,6 +851,35 @@ fn HistoryPanel(kid: api::KidHistory, span: Span, offset: RwSignal<i32>) -> impl
                         </div>
                     }).collect_view()}
                 </div>
+                {(span == Span::Month).then(|| {
+                    use chrono::Datelike;
+                    // A wall calendar: Sunday first, each day shaded by how much it was used.
+                    let first = add_months(today.with_day(1).unwrap_or(today), off);
+                    let blanks = first.weekday().num_days_from_sunday() as usize;
+                    let most = p.buckets.iter().filter_map(|b| b.minutes).max().unwrap_or(0).max(1);
+                    view! {
+                        <div class="calendar">
+                            {["S", "M", "T", "W", "T", "F", "S"].map(|d| view! { <span class="dow">{d}</span> }).collect_view()}
+                            {(0..blanks).map(|_| view! { <span class="blank"></span> }).collect_view()}
+                            {p.buckets.iter().enumerate().map(|(i, b)| {
+                                let day = first + chrono::Duration::days(i as i64);
+                                let back = (day - today).num_days() as i32;
+                                let level = b.minutes.map_or(0, |m| if m == 0 { 0 } else { 1 + (m * 4 / (most + 1)) as usize });
+                                let label = format!("{}: {}", b.title, b.minutes.map_or("not yet".into(), fmt_minutes));
+                                view! {
+                                    <button class=format!("cal-day lvl{level}") class:future=b.minutes.is_none() class:today=day == today
+                                        disabled={b.minutes.is_none()} aria-label=label
+                                        on:click=move |_| { offset.set(back); span_signal.set(Span::Day); }>
+                                        <span class="cal-num">{day.day()}</span>
+                                        <span class="cal-min">{b.minutes.filter(|m| *m > 0).map(short_minutes).unwrap_or_default()}</span>
+                                    </button>
+                                }
+                            }).collect_view()}
+                        </div>
+                        <p class="chart-hint">"Tap a day to see its sessions"</p>
+                    }
+                })}
+                {(span != Span::Month).then(|| view! {
                 <div class="chart" class:dense=dense>
                     <div class="chart-grid" aria-hidden="true">
                         <span><i>{short_minutes(top)}</i></span>
@@ -874,6 +903,28 @@ fn HistoryPanel(kid: api::KidHistory, span: Span, offset: RwSignal<i32>) -> impl
                     </div>
                 </div>
                 <p class="chart-hint">{hint_text}</p>
+                })}
+                {(span == Span::Day).then(|| {
+                    let sessions = by_day.get(&(today + chrono::Duration::days(off as i64))).map(|d| d.sessions.clone()).unwrap_or_default();
+                    view! {
+                        <h3 class="sessions-head">"Sessions"</h3>
+                        {if sessions.is_empty() {
+                            view! { <p class="muted small">"No sessions recorded for this day."</p> }.into_any()
+                        } else {
+                            view! {
+                                <ul class="sessions">
+                                    {sessions.into_iter().map(|s| view! {
+                                        <li>
+                                            <span class="session-time">{format!("{} \u{2013} {}", local_time(&s.started_at), local_time(&s.ended_at))}</span>
+                                            <span class="session-len">{fmt_minutes(s.minutes)}</span>
+                                            <span class="session-host muted small">{s.host}</span>
+                                        </li>
+                                    }).collect_view()}
+                                </ul>
+                            }.into_any()
+                        }}
+                    }
+                })}
             </section>
         }
     }
@@ -1385,7 +1436,7 @@ mod history_tests {
         let by_day: std::collections::HashMap<_, _> = (0..800)
             .map(|i| {
                 let day = today - chrono::Duration::days(i);
-                (day, api::DayHistory { day, minutes: (i % 90) as u32, hours: vec![1; 24] })
+                (day, api::DayHistory { day, minutes: (i % 90) as u32, hours: vec![1; 24], sessions: Vec::new() })
             })
             .collect();
         for span in Span::ALL {

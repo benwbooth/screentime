@@ -580,6 +580,11 @@ async fn history_has_daily_totals_and_hours() {
     let hour = chrono::Timelike::hour(&Local::now()) as usize;
     assert_eq!(last["hours"][hour], 30);
     assert_eq!(days[0]["minutes"], 0);
+    // pc1's two reports are one continuing session; pc2's is its own.
+    let sessions = last["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    let pc1_session = sessions.iter().find(|s| s["host"] == "pc1").unwrap();
+    assert_eq!(pc1_session["minutes"], 25);
 }
 
 #[tokio::test]

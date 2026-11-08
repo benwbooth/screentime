@@ -145,6 +145,17 @@ pub struct DayHistory {
     pub day: chrono::NaiveDate,
     pub minutes: u32,
     pub hours: Vec<u32>,
+    #[serde(default)]
+    pub sessions: Vec<PlaySession>,
+}
+
+/// A stretch of continuous use on one computer; times are RFC 3339 in UTC.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PlaySession {
+    pub host: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub minutes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
