@@ -315,12 +315,16 @@ fn Login() -> impl IntoView {
     };
     view! {
         <main class="login">
-            <form class="card login-card" on:submit=submit>
+            // Shaped like an ordinary sign-in form (a username and a named password field) so
+            // phone password managers offer to fill and save it.
+            <form class="card login-card" method="post" action="/api/login" name="login" on:submit=submit>
                 <Logo/>
                 <h1>"Screen time"</h1>
                 <p class="muted">"Sign in to manage limits and requests."</p>
-                <label for="pw">"Password"</label>
-                <input id="pw" type="password" autocomplete="current-password" required
+                <input class="visually-hidden" type="text" id="username" name="username" autocomplete="username"
+                    value="screentime" readonly tabindex="-1" aria-hidden="true"/>
+                <label for="password">"Password"</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required
                     prop:value=move || password.get()
                     on:input=move |ev| password.set(event_target_value(&ev))/>
                 {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
@@ -1407,6 +1411,9 @@ fn AccountView() -> impl IntoView {
         <header class="page-head"><h1>"Account"</h1></header>
         <form class="card form" on:submit=change>
             <h3>"Change password"</h3>
+            // Same username as the sign-in form, so a password manager updates the saved entry.
+            <input class="visually-hidden" type="text" name="username" autocomplete="username"
+                value="screentime" readonly tabindex="-1" aria-hidden="true"/>
             {field("pw-current", "Current password", "current-password", current)}
             {field("pw-new", "New password", "new-password", new)}
             {field("pw-confirm", "New password again", "new-password", confirm)}
