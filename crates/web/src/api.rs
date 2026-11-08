@@ -139,18 +139,23 @@ pub async fn change_password(current: &str, new: &str) -> ApiResult<()> {
     send("POST", "/api/password", &serde_json::json!({ "current": current, "new": new })).await.map(drop)
 }
 
-pub async fn parent_pin_set() -> ApiResult<bool> {
-    #[derive(Deserialize)]
-    struct PinState {
-        set: bool,
-    }
-    let p: PinState = get("/api/parent-pin").await?;
-    Ok(p.set)
+/// One day of a kid's use: the total and minutes in each hour, midnight first.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DayHistory {
+    pub day: chrono::NaiveDate,
+    pub minutes: u32,
+    pub hours: Vec<u32>,
 }
 
-/// Set the parent PIN, or remove it with `None`.
-pub async fn set_parent_pin(pin: Option<&str>) -> ApiResult<()> {
-    send("PUT", "/api/parent-pin", &serde_json::json!({ "pin": pin })).await.map(drop)
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct KidHistory {
+    pub username: String,
+    pub name: String,
+    pub days: Vec<DayHistory>,
+}
+
+pub async fn history(days: u32) -> ApiResult<Vec<KidHistory>> {
+    get(&format!("/api/history?days={days}")).await
 }
 
 pub async fn overview() -> ApiResult<Overview> {

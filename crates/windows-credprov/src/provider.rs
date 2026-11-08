@@ -59,7 +59,7 @@ fn field(id: u32) -> (CREDENTIAL_PROVIDER_FIELD_TYPE, String) {
         F_ASK => (CPFT_COMMAND_LINK, "Request more time".into()),
         F_PARENT_LABEL => (CPFT_SMALL_TEXT, "My parent is here".into()),
         F_ADMIN => (CPFT_COMBOBOX, "Parent".into()),
-        F_PASSWORD => (CPFT_PASSWORD_TEXT, "Parent PIN".into()),
+        F_PASSWORD => (CPFT_PASSWORD_TEXT, "Screen time password".into()),
         F_ADD => (CPFT_COMBOBOX, "Add".into()),
         _ => (CPFT_SUBMIT_BUTTON, "Add time".into()),
     }
@@ -389,9 +389,9 @@ impl ICredentialProviderCredential_Impl for Credential_Impl {
             self.show(F_PASSWORD, "");
             let (text, ok) = match self.selected_user() {
                 _ if admin.is_empty() || password.is_empty() => {
-                    ("Enter the parent PIN.".to_string(), false)
+                    ("Enter the Screen time password.".to_string(), false)
                 }
-                _ if !fresh => ("Clear the PIN box and type the PIN again.".to_string(), false),
+                _ if !fresh => ("Clear the password box and type it again.".to_string(), false),
                 None => ("No account to add time for.".to_string(), false),
                 Some(username) => {
                     let minutes = ADD_AMOUNTS[*self.add.borrow() as usize];

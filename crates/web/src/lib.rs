@@ -49,6 +49,7 @@ enum Auth {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Today,
+    History,
     Schedules,
     Machines,
     Notifications,
@@ -56,11 +57,12 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [Tab::Today, Tab::Schedules, Tab::Machines, Tab::Notifications, Tab::Account];
+    const ALL: [Tab; 6] = [Tab::Today, Tab::History, Tab::Schedules, Tab::Machines, Tab::Notifications, Tab::Account];
 
     fn label(self) -> &'static str {
         match self {
             Tab::Today => "Today",
+            Tab::History => "History",
             Tab::Schedules => "Schedules",
             Tab::Machines => "Computers",
             Tab::Notifications => "Alerts",
@@ -71,6 +73,7 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Today => "M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z",
+            Tab::History => "M4 20V11M10 20V5M16 20v-6M2 20h20",
             Tab::Schedules => "M4 6h16M4 12h16M4 18h10M8 3v6M16 3v6",
             Tab::Machines => "M3 5h18v11H3zM8 20h8M12 16v4",
             Tab::Notifications => "M6 16V11a6 6 0 1 1 12 0v5l2 2H4zM10 20a2 2 0 0 0 4 0",
@@ -363,6 +366,7 @@ fn Shell() -> impl IntoView {
             <main class="content">
                 {move || match ctx.tab.get() {
                     Tab::Today => view! { <TodayView/> }.into_any(),
+                    Tab::History => view! { <HistoryView/> }.into_any(),
                     Tab::Schedules => view! { <SchedulesView/> }.into_any(),
                     Tab::Machines => view! { <MachinesView/> }.into_any(),
                     Tab::Notifications => view! { <NotificationsView/> }.into_any(),
@@ -575,6 +579,120 @@ fn KidCard(u: UserOverview, today: chrono::NaiveDate) -> impl IntoView {
                 })}
             </div>
         </article>
+    }
+}
+
+#[component]
+fn HistoryView() -> impl IntoView {
+    let ctx = ctx();
+    let kids = RwSignal::new(None::<Vec<api::KidHistory>>);
+    spawn_local(async move {
+        match api::history(28).await {
+            Ok(h) => kids.set(Some(h)),
+            Err(ApiError::Unauthorized) => ctx.set_auth(Auth::SignedOut),
+            Err(e) => ctx.say(e.to_string(), false),
+        }
+    });
+    view! {
+        <header class="page-head"><h1>"History"</h1></header>
+        {move || match kids.get() {
+            None => view! { <p class="muted">"Loading\u{2026}"</p> }.into_any(),
+            Some(k) if k.is_empty() => view! { <p class="empty">"No kids yet."</p> }.into_any(),
+            Some(k) => view! {
+                <div class="grid">{k.into_iter().map(|kid| view! { <KidHistoryCard kid=kid/> }).collect_view()}</div>
+            }.into_any(),
+        }}
+    }
+}
+
+/// A kid's last four weeks: weekly totals, the last seven days, and one day hour by hour.
+#[component]
+fn KidHistoryCard(kid: api::KidHistory) -> impl IntoView {
+    use chrono::Datelike;
+    let days = kid.days;
+    let n = days.len();
+    // Calendar weeks, Sunday first, like a wall calendar: (total, days counted so far).
+    let today = days.last().map(|d| d.day).unwrap_or_default();
+    let this_sunday = today - chrono::Duration::days(today.weekday().num_days_from_sunday() as i64);
+    let week = |back: i64| -> (u32, u32) {
+        let start = this_sunday - chrono::Duration::days(7 * back);
+        let end = (start + chrono::Duration::days(7)).min(today + chrono::Duration::days(1));
+        let total = days.iter().filter(|d| d.day >= start && d.day < end).map(|d| d.minutes).sum();
+        (total, (end - start).num_days() as u32)
+    };
+    let weeks: Vec<(u32, u32)> = (0..4).map(week).collect();
+    let last7: Vec<api::DayHistory> = days[n.saturating_sub(7)..].to_vec();
+    let selected = RwSignal::new(last7.len().saturating_sub(1));
+    let day_max = last7.iter().map(|d| d.minutes).max().unwrap_or(0).max(60);
+    let week_label = |i: usize| match i {
+        0 => "This week".to_string(),
+        1 => "Last week".to_string(),
+        i => format!("{i} weeks ago"),
+    };
+    let bars = last7.clone();
+    let detail = last7.clone();
+    view! {
+        <article class="card history">
+            <strong>{kid.name}</strong>
+            <ul class="weeks">
+                {weeks.iter().enumerate().map(|(i, (m, counted))| view! {
+                    <li>
+                        <span class="muted small">{week_label(i)}</span>
+                        <b>{fmt_minutes(*m)}</b>
+                        <span class="muted small">{format!("{} a day", fmt_minutes(m / (*counted).max(1)))}</span>
+                    </li>
+                }).collect_view()}
+            </ul>
+            <div class="label">"Last 7 days"</div>
+            <div class="bars days">
+                {bars.into_iter().enumerate().map(|(i, d)| {
+                    let height = format!("height: {}%", (d.minutes * 100 / day_max).max(if d.minutes > 0 { 3 } else { 0 }));
+                    let title = format!("{}: {}", d.day.format("%a %b %-d"), fmt_minutes(d.minutes));
+                    view! {
+                        <button class="bar-col" class:sel=move || selected.get() == i title=title.clone()
+                            aria-label=title on:click=move |_| selected.set(i)>
+                            <span class="bar-value">{if d.minutes > 0 { short_minutes(d.minutes) } else { String::new() }}</span>
+                            <span class="bar" style=height></span>
+                            <span class="bar-label">{d.day.format("%a").to_string()}</span>
+                        </button>
+                    }
+                }).collect_view()}
+            </div>
+            {move || {
+                let d = detail[selected.get().min(detail.len().saturating_sub(1))].clone();
+                let hour_max = d.hours.iter().copied().max().unwrap_or(0).max(15);
+                let recorded: u32 = d.hours.iter().sum();
+                view! {
+                    <div class="label spaced">{format!("{} \u{00b7} {}", d.day.format("%A %b %-d"), fmt_minutes(d.minutes))}</div>
+                    {if recorded == 0 && d.minutes > 0 {
+                        view! { <p class="muted small">"No hour-by-hour detail for this day: it's only kept from the day it was turned on."</p> }.into_any()
+                    } else {
+                        view! {
+                            <div class="bars hours">
+                                {d.hours.iter().enumerate().map(|(h, m)| {
+                                    let height = format!("height: {}%", (m * 100 / hour_max).max(if *m > 0 { 4 } else { 0 }));
+                                    view! { <span class="bar" style=height title=format!("{}: {}", hour_label(h), fmt_minutes(*m))></span> }
+                                }).collect_view()}
+                            </div>
+                            <div class="hour-axis muted small"><span>"12a"</span><span>"6a"</span><span>"12p"</span><span>"6p"</span><span>"12a"</span></div>
+                        }.into_any()
+                    }}
+                }
+            }}
+        </article>
+    }
+}
+
+fn short_minutes(m: u32) -> String {
+    if m < 60 { format!("{m}m") } else { format!("{:.1}h", m as f32 / 60.0).replace(".0h", "h") }
+}
+
+fn hour_label(h: usize) -> String {
+    match h {
+        0 => "12 AM".into(),
+        12 => "12 PM".into(),
+        h if h < 12 => format!("{h} AM"),
+        h => format!("{} PM", h - 12),
     }
 }
 
@@ -973,88 +1091,6 @@ fn NotificationsView() -> impl IntoView {
     }
 }
 
-/// The PIN a parent types at a computer for "My parent is here".
-#[component]
-fn ParentPin() -> impl IntoView {
-    let ctx = ctx();
-    let is_set = RwSignal::new(None::<bool>);
-    let pin = RwSignal::new(String::new());
-    let confirm = RwSignal::new(String::new());
-    let error = RwSignal::new(None::<String>);
-    let load = move || {
-        spawn_local(async move {
-            if let Ok(set) = api::parent_pin_set().await {
-                is_set.set(Some(set));
-            }
-        })
-    };
-    load();
-    let save = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-        let (p, c) = (pin.get_untracked(), confirm.get_untracked());
-        if p != c {
-            error.set(Some("The PINs don't match.".into()));
-            return;
-        }
-        if !(4..=32).contains(&p.chars().count()) {
-            error.set(Some("Use 4 to 32 characters.".into()));
-            return;
-        }
-        error.set(None);
-        spawn_local(async move {
-            match api::set_parent_pin(Some(&p)).await {
-                Ok(()) => {
-                    pin.set(String::new());
-                    confirm.set(String::new());
-                    ctx.say("Parent PIN saved. The computers pick it up within a minute.", true);
-                    load();
-                }
-                Err(e) => error.set(Some(e.to_string())),
-            }
-        });
-    };
-    let remove = move |_: leptos::ev::MouseEvent| {
-        if confirm_action("Remove the parent PIN? Nobody will be able to approve time at a computer until a new one is set.") {
-            spawn_local(async move {
-                match api::set_parent_pin(None).await {
-                    Ok(()) => {
-                        ctx.say("Parent PIN removed", true);
-                        load();
-                    }
-                    Err(e) => ctx.say(e.to_string(), false),
-                }
-            });
-        }
-    };
-    let field = |id: &'static str, label: &'static str, value: RwSignal<String>| {
-        view! {
-            <label for=id>{label}</label>
-            <input id=id type="password" inputmode="numeric" autocomplete="new-password" required
-                prop:value=move || value.get() on:input=move |ev| value.set(event_target_value(&ev))/>
-        }
-    };
-    view! {
-        <form class="card form" on:submit=save>
-            <h3>"Parent PIN"</h3>
-            <p class="muted small">
-                "The only thing a computer accepts for \u{201c}My parent is here\u{201d}. Use one you don't use anywhere else, and cover the keyboard when you type it. "
-                {move || match is_set.get() {
-                    Some(true) => "A PIN is set.",
-                    Some(false) => "No PIN is set yet.",
-                    None => "",
-                }}
-            </p>
-            {field("pin-new", "New PIN", pin)}
-            {field("pin-confirm", "New PIN again", confirm)}
-            {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
-            <div class="row">
-                <button class="primary">{move || if is_set.get() == Some(true) { "Change PIN" } else { "Set PIN" }}</button>
-                {move || (is_set.get() == Some(true)).then(|| view! { <button type="button" class="ghost danger" on:click=remove>"Remove PIN"</button> })}
-            </div>
-        </form>
-    }
-}
-
 #[component]
 fn AccountView() -> impl IntoView {
     let ctx = ctx();
@@ -1113,7 +1149,7 @@ fn AccountView() -> impl IntoView {
             {field("pw-current", "Current password", "current-password", current)}
             {field("pw-new", "New password", "new-password", new)}
             {field("pw-confirm", "New password again", "new-password", confirm)}
-            <p class="muted small">"At least 7 characters. Changing it signs out every other device."</p>
+            <p class="muted small">"At least 7 characters. It's also what you type at a computer for \u{201c}My parent is here\u{201d}. Changing it signs out every other device, and the computers take the new one within a minute."</p>
             {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
             <div class="row">
                 <button class="primary" disabled=move || busy.get()>
@@ -1121,7 +1157,6 @@ fn AccountView() -> impl IntoView {
                 </button>
             </div>
         </form>
-        <ParentPin/>
         <div class="card">
             <h3>"Sign out"</h3>
             <p class="muted small">"Signs out this device only."</p>

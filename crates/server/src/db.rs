@@ -3,7 +3,7 @@
 use crate::auth::{hash_token, new_token};
 use screentime_common::{DowntimeWindow, Policy, UsageReport};
 use anyhow::Result;
-use chrono::{Datelike, NaiveDate, Utc, Weekday};
+use chrono::{Datelike, NaiveDate, Timelike, Utc, Weekday};
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -174,6 +174,31 @@ pub async fn usage(db: &SqlitePool, user: i64, day: NaiveDate) -> Result<Vec<Hos
 }
 
 pub async fn record_usage(db: &SqlitePool, user: i64, host: &str, report: &UsageReport) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let before: u32 = sqlx::query_scalar::<_, i64>("SELECT active_minutes FROM usage WHERE user_id = ? AND host = ? AND day = ?")
+        .bind(user)
+        .bind(host)
+        .bind(report.day)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(0) as u32;
+    // Reports come every few seconds, so the minutes added since the last one belong to the
+    // hour it is now. A late report for an earlier day only updates that day's total.
+    let now_local = chrono::Local::now();
+    let added = report.active_minutes.saturating_sub(before);
+    if added > 0 && report.day == now_local.date_naive() {
+        sqlx::query(
+            "INSERT INTO usage_hours (user_id, host, day, hour, minutes) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (user_id, host, day, hour) DO UPDATE SET minutes = minutes + excluded.minutes",
+        )
+        .bind(user)
+        .bind(host)
+        .bind(report.day)
+        .bind(now_local.hour() as i64)
+        .bind(added.min(60))
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query(
         "INSERT INTO usage (user_id, host, day, active_minutes, local_bonus_minutes, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -188,9 +213,55 @@ pub async fn record_usage(db: &SqlitePool, user: i64, host: &str, report: &Usage
     .bind(report.active_minutes)
     .bind(report.local_bonus_minutes)
     .bind(now())
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
+}
+
+/// One day of a kid's use across all computers: the total and how it spread over the hours.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DayHistory {
+    pub day: NaiveDate,
+    pub minutes: u32,
+    /// Minutes in each hour, midnight first; all zero for days before hours were recorded.
+    pub hours: [u32; 24],
+}
+
+/// The kid's last `days` days, oldest first, including days with no use.
+pub async fn history(db: &SqlitePool, user: i64, today: NaiveDate, days: u32) -> Result<Vec<DayHistory>> {
+    let first = today - chrono::Duration::days(days as i64 - 1);
+    let mut out: Vec<DayHistory> = (0..days)
+        .map(|i| DayHistory { day: first + chrono::Duration::days(i as i64), minutes: 0, hours: [0; 24] })
+        .collect();
+    let totals: Vec<(NaiveDate, i64)> =
+        sqlx::query_as("SELECT day, SUM(active_minutes) FROM usage WHERE user_id = ? AND day >= ? AND day <= ? GROUP BY day")
+            .bind(user)
+            .bind(first)
+            .bind(today)
+            .fetch_all(db)
+            .await?;
+    for (day, minutes) in totals {
+        if let Some(d) = out.get_mut((day - first).num_days() as usize) {
+            d.minutes = minutes as u32;
+        }
+    }
+    let hours: Vec<(NaiveDate, i64, i64)> = sqlx::query_as(
+        "SELECT day, hour, SUM(minutes) FROM usage_hours WHERE user_id = ? AND day >= ? AND day <= ? GROUP BY day, hour",
+    )
+    .bind(user)
+    .bind(first)
+    .bind(today)
+    .fetch_all(db)
+    .await?;
+    for (day, hour, minutes) in hours {
+        if let (Some(d), Ok(h)) = (out.get_mut((day - first).num_days() as usize), usize::try_from(hour)) {
+            if h < 24 {
+                d.hours[h] = minutes as u32;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The policy a client on `host` should enforce today. A kid's time is shared across machines,
@@ -531,28 +602,6 @@ pub async fn set_admin_password_hash(db: &SqlitePool, hash: &str) -> Result<()> 
     Ok(())
 }
 
-const PARENT_PIN_SETTING: &str = "parent_pin_hash";
-
-pub async fn parent_pin_hash(db: &SqlitePool) -> Result<Option<String>> {
-    Ok(sqlx::query_scalar("SELECT value FROM settings WHERE key = ?").bind(PARENT_PIN_SETTING).fetch_optional(db).await?)
-}
-
-/// Set the parent PIN's hash, or remove the PIN with None.
-pub async fn set_parent_pin_hash(db: &SqlitePool, hash: Option<&str>) -> Result<()> {
-    match hash {
-        Some(h) => {
-            sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
-                .bind(PARENT_PIN_SETTING)
-                .bind(h)
-                .execute(db)
-                .await?;
-        }
-        None => {
-            sqlx::query("DELETE FROM settings WHERE key = ?").bind(PARENT_PIN_SETTING).execute(db).await?;
-        }
-    }
-    Ok(())
-}
 
 pub async fn delete_all_sessions(db: &SqlitePool) -> Result<()> {
     sqlx::query("DELETE FROM sessions").execute(db).await?;

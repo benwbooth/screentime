@@ -599,13 +599,13 @@ impl<P: Platform> Agent<P> {
         // computer the kids use. A limited account fails exactly like a wrong PIN.
         let Some(pin_hash) = self.state.lock().await.parent_pin_hash.clone() else {
             self.parent_failures.lock().await.pop();
-            return error("No parent PIN is set yet. Set one in Screen time under Account.");
+            return error("Screen time has no password set yet.");
         };
         let verified = !self.is_managed(&admin) && tokio::task::block_in_place(|| pin_matches(&pin_hash, &password));
         if !verified {
             tracing::warn!(%admin, user = %username, "refused \"my parent is here\" grant");
             tokio::time::sleep(PARENT_FAILURE_DELAY).await;
-            return error("That PIN isn't right.");
+            return error("That password isn't right.");
         }
 
         self.parent_failures.lock().await.clear();
@@ -615,7 +615,7 @@ impl<P: Platform> Agent<P> {
         if let Err(e) = state.save(&self.config.state_dir) {
             tracing::error!("saving state failed: {e:#}");
         }
-        tracing::info!(%admin, user = %username, minutes, "parent granted time locally with the PIN");
+        tracing::info!(%admin, user = %username, minutes, "parent granted time locally with the Screen time password");
         SocketResponse::Granted { minutes }
     }
 }

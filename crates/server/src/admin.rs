@@ -24,8 +24,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/password", post(change_password))
-        .route("/api/parent-pin", get(parent_pin).put(set_parent_pin))
         .route("/api/keepalive", post(keepalive))
+        .route("/api/history", get(history))
         .route("/api/overview", get(overview))
         .route("/api/users", post(add_user))
         .route("/api/users/{username}", get(user))
@@ -447,40 +447,38 @@ async fn set_name(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
-struct PinState {
-    set: bool,
-}
-
 /// The parent is still using the page: the Admin check itself pushes the idle sign-out back.
 async fn keepalive(_: Admin) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-async fn parent_pin(State(s): State<AppState>, _: Admin) -> AppResult<Json<PinState>> {
-    Ok(Json(PinState { set: db::parent_pin_hash(&s.db).await?.is_some() }))
-}
-
 #[derive(Deserialize)]
-struct PinBody {
-    /// The new PIN, or None to remove it.
-    pin: Option<String>,
+struct HistoryQuery {
+    days: Option<u32>,
 }
 
-/// The PIN a parent types at a computer for "My parent is here", instead of their Windows
-/// password (Windows doesn't let programs check a Windows Hello PIN).
-async fn set_parent_pin(State(s): State<AppState>, _: Admin, Json(body): Json<PinBody>) -> AppResult<StatusCode> {
-    let hash = match body.pin {
-        Some(pin) => {
-            let len = pin.chars().count();
-            if !(4..=32).contains(&len) {
-                return Err(AppError::BadRequest("Use 4 to 32 characters.".into()));
-            }
-            Some(tokio::task::spawn_blocking(move || crate::auth::hash_password(&pin)).await??)
-        }
-        None => None,
-    };
-    db::set_parent_pin_hash(&s.db, hash.as_deref()).await?;
-    tracing::info!(set = hash.is_some(), "parent PIN changed");
-    Ok(StatusCode::NO_CONTENT)
+#[derive(Serialize)]
+struct KidHistory {
+    username: String,
+    name: String,
+    days: Vec<db::DayHistory>,
+}
+
+/// Each kid's daily use for the last `days` days (default four weeks), with hourly detail.
+async fn history(
+    State(s): State<AppState>,
+    _: Admin,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> AppResult<Json<Vec<KidHistory>>> {
+    let days = q.days.unwrap_or(28).clamp(1, 366);
+    let today = Local::now().date_naive();
+    let mut out = Vec::new();
+    for (id, username) in db::usernames(&s.db).await? {
+        out.push(KidHistory {
+            name: db::display_name(&s.db, id).await?.unwrap_or_else(|| username.clone()),
+            days: db::history(&s.db, id, today, days).await?,
+            username,
+        });
+    }
+    Ok(Json(out))
 }

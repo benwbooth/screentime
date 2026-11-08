@@ -107,7 +107,8 @@ async fn accounts(
     let limited = db::report_accounts(&s.db, client.id, &report.accounts, s.config.default_allowance_minutes).await?;
     Ok(Json(AccountsReply {
         limited,
-        parent_pin_hash: db::parent_pin_hash(&s.db).await?,
+        // "My parent is here" takes the same password as the web UI.
+        parent_pin_hash: db::admin_password_hash(&s.db).await?.or_else(|| s.config.admin_password_hash.clone()),
     }))
 }
 

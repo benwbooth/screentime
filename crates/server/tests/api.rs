@@ -543,27 +543,43 @@ async fn parents_can_lock_and_take_time_away() {
 }
 
 #[tokio::test]
-async fn parent_pin_reaches_the_computers() {
+async fn the_web_password_approves_time_at_the_computers() {
     let s = server(with_password()).await;
     let pc1 = db::add_client(&s.state.db, "Ryan-PC").await.unwrap();
-    let cookie = s.admin_cookie().await;
-    let me = Some(cookie.as_str());
+    let me = s.admin_cookie().await;
     let report = json!({"accounts": [{"name": "ryany", "admin": false}]});
-    let reply = |body: String| serde_json::from_str::<Value>(&body).unwrap()["parent_pin_hash"].clone();
+    let hash = |body: String| serde_json::from_str::<Value>(&body).unwrap()["parent_pin_hash"].as_str().unwrap().to_owned();
 
-    assert_eq!(reply(s.call("POST", "/api/client/accounts", Some(&pc1), Some(report.clone())).await.2), Value::Null);
-    assert_eq!(s.call("PUT", "/api/parent-pin", me, Some(json!({"pin": "123"}))).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(s.call("PUT", "/api/parent-pin", me, Some(json!({"pin": "4321"}))).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(s.call("GET", "/api/parent-pin", me, None).await.2, r#"{"set":true}"#);
-    let hash = reply(s.call("POST", "/api/client/accounts", Some(&pc1), Some(report.clone())).await.2);
-    assert!(auth::verify_password(hash.as_str().unwrap(), "4321"));
-    assert!(!auth::verify_password(hash.as_str().unwrap(), "1234"));
-    // The web password itself never goes to the computers.
-    let body = s.call("POST", "/api/client/accounts", Some(&pc1), Some(report.clone())).await.2;
-    assert!(!body.contains("admin_password_hash"), "{body}");
-    assert_eq!(s.call("PUT", "/api/parent-pin", None, Some(json!({"pin": "9999"}))).await.0, StatusCode::UNAUTHORIZED);
-    s.call("PUT", "/api/parent-pin", me, Some(json!({"pin": null}))).await;
-    assert_eq!(reply(s.call("POST", "/api/client/accounts", Some(&pc1), Some(report)).await.2), Value::Null);
+    let first = hash(s.call("POST", "/api/client/accounts", Some(&pc1), Some(report.clone())).await.2);
+    assert!(auth::verify_password(&first, "correct horse"));
+    // Changing the password changes what the computers accept.
+    let change = json!({"current": "correct horse", "new": "battery staple"});
+    let (status, headers, _) = s.call("POST", "/api/password", Some(me.as_str()), Some(change)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{headers:?}");
+    let second = hash(s.call("POST", "/api/client/accounts", Some(&pc1), Some(report)).await.2);
+    assert!(auth::verify_password(&second, "battery staple") && !auth::verify_password(&second, "correct horse"));
+}
+
+#[tokio::test]
+async fn history_has_daily_totals_and_hours() {
+    let s = server(with_password()).await;
+    let me = s.admin_cookie().await;
+    let pc1 = db::add_client(&s.state.db, "pc1").await.unwrap();
+    let pc2 = db::add_client(&s.state.db, "pc2").await.unwrap();
+    let today = Local::now().date_naive();
+    for (pc, minutes) in [(&pc1, 10), (&pc1, 25), (&pc2, 5)] {
+        let report = UsageReport { username: "kid".into(), host: "x".into(), day: today, active_minutes: minutes, local_bonus_minutes: 0 };
+        s.call("POST", "/api/client/usage", Some(pc), Some(serde_json::to_value(&report).unwrap())).await;
+    }
+    let body: Value = serde_json::from_str(&s.call("GET", "/api/history?days=7", Some(me.as_str()), None).await.2).unwrap();
+    let days = body[0]["days"].as_array().unwrap();
+    assert_eq!(days.len(), 7);
+    let last = &days[6];
+    assert_eq!(last["day"], today.to_string());
+    assert_eq!(last["minutes"], 30);
+    let hour = chrono::Timelike::hour(&Local::now()) as usize;
+    assert_eq!(last["hours"][hour], 30);
+    assert_eq!(days[0]["minutes"], 0);
 }
 
 #[tokio::test]
