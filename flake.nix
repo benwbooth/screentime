@@ -95,14 +95,20 @@
           docker = pkgs.dockerTools.buildLayeredImage {
             name = "screentime";
             tag = "latest";
-            contents = [ pkgs.cacert ];
-            extraCommands = "mkdir -p data tmp && chmod 1777 tmp";
+            contents = [ pkgs.cacert pkgs.tzdata ];
+            # Timezone data, so TZ=America/Los_Angeles works: without it the server's "today" is
+            # UTC's, which rolls over at 4 PM in California.
+            extraCommands = ''
+              mkdir -p data tmp usr/share etc && chmod 1777 tmp
+              ln -s ${pkgs.tzdata}/share/zoneinfo usr/share/zoneinfo
+            '';
             config = {
               Cmd = [ "${default}/bin/screentime-server" "serve" ];
               Env = [
                 "SCREENTIME_LISTEN=0.0.0.0:8443"
                 "SCREENTIME_DB=sqlite:///data/screentime.db"
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                "TZDIR=${pkgs.tzdata}/share/zoneinfo"
               ];
               ExposedPorts."8443/tcp" = { };
               Volumes."/data" = { };
