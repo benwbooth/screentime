@@ -470,7 +470,7 @@ async fn history(
     _: Admin,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
 ) -> AppResult<Json<Vec<KidHistory>>> {
-    let days = q.days.unwrap_or(28).clamp(1, 366);
+    let days = q.days.unwrap_or(28).clamp(1, 800);
     let today = Local::now().date_naive();
     let mut out = Vec::new();
     for (id, username) in db::usernames(&s.db).await? {

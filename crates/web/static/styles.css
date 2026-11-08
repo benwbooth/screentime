@@ -161,19 +161,31 @@ label { font-weight: 600; font-size: 0.9rem; }
 .chip.lock.active { background: var(--off); color: #fff; border-color: var(--off); }
 
 /* History */
-.history .weeks { list-style: none; padding: 0; margin: 12px 0 16px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.history .weeks li { display: flex; flex-direction: column; background: var(--surface-2); border-radius: 10px; padding: 8px; min-width: 0; }
-.history .weeks b { font-size: 1.05rem; }
-.bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; }
-.bars.days { height: 150px; gap: 6px; }
-.bars .bar { display: block; width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; }
-.bars.hours { height: 90px; gap: 2px; border-bottom: 1px solid var(--line); }
-.bars.hours .bar { flex: 1; border-radius: 2px 2px 0 0; }
-.bar-col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; padding: 0; min-width: 0; background: none; border: 0; border-radius: 6px; cursor: pointer; color: inherit; }
-.bar-col .bar { opacity: 0.55; }
-.bar-col.sel .bar { opacity: 1; }
-.bar-col.sel .bar-label { color: var(--text); font-weight: 650; }
-.bar-value { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
-.bar-label { font-size: 0.75rem; color: var(--muted); }
-.hour-axis { display: flex; justify-content: space-between; margin-top: 4px; }
-@media (max-width: 420px) { .history .weeks { grid-template-columns: repeat(2, 1fr); } }
+.history-controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.segmented { display: inline-flex; background: var(--surface-2); border-radius: 10px; padding: 3px; gap: 2px; }
+.segmented button { border: 0; background: transparent; color: var(--muted); font-weight: 600; font-size: 0.9rem; padding: 6px 14px; border-radius: 8px; min-height: 0; }
+.segmented button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
+.history-panel { padding: 16px 16px 12px; }
+.period-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.period-nav h3 { margin: 0; font-size: 1.05rem; }
+.period-nav .icon { width: 36px; height: 36px; padding: 0; font-size: 1.4rem; line-height: 1; border-radius: 10px; }
+.period-nav .icon:disabled { opacity: 0.3; }
+.stat-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 18px; }
+.stat { display: flex; flex-direction: column; gap: 2px; background: var(--surface-2); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.stat-label { font-size: 0.75rem; color: var(--muted); }
+.stat-value { font-size: 1.15rem; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-sub { font-size: 0.75rem; color: var(--muted); }
+.chart { position: relative; display: grid; grid-template-columns: 1fr; padding-left: 34px; }
+.chart-grid { position: absolute; inset: 0 0 22px 34px; display: flex; flex-direction: column; justify-content: space-between; pointer-events: none; }
+.chart-grid span { position: relative; border-top: 1px solid var(--line); height: 0; }
+.chart-grid i { position: absolute; right: calc(100% + 6px); top: -0.6em; font-style: normal; font-size: 0.7rem; color: var(--muted); }
+.chart-bars { position: relative; height: 180px; display: flex; align-items: flex-end; gap: 2px; }
+.chart-bars .col { flex: 1; height: 100%; display: flex; align-items: flex-end; justify-content: center; padding: 0; border: 0; background: transparent; border-radius: 6px; min-width: 0; min-height: 0; cursor: pointer; }
+.chart-bars .col:hover, .chart-bars .col.on { background: var(--surface-2); }
+.chart-bars .bar { width: 100%; max-width: 24px; background: var(--accent); border-radius: 4px 4px 0 0; }
+.chart.dense .chart-bars .bar { max-width: 14px; border-radius: 3px 3px 0 0; }
+.chart-bars .col.future .bar { display: none; }
+.chart-axis { display: flex; gap: 2px; height: 22px; align-items: flex-end; }
+.chart-axis span { flex: 1; min-width: 0; text-align: center; font-size: 0.72rem; color: var(--muted); white-space: nowrap; overflow: visible; }
+.chart-hint { margin: 10px 0 0; font-size: 0.85rem; color: var(--muted); min-height: 1.3em; }
+@media (max-width: 520px) { .stat-tiles { grid-template-columns: repeat(2, 1fr); } }

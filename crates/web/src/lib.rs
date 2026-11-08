@@ -582,12 +582,164 @@ fn KidCard(u: UserOverview, today: chrono::NaiveDate) -> impl IntoView {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Span {
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl Span {
+    const ALL: [Span; 4] = [Span::Day, Span::Week, Span::Month, Span::Year];
+    fn label(self) -> &'static str {
+        match self {
+            Span::Day => "Day",
+            Span::Week => "Week",
+            Span::Month => "Month",
+            Span::Year => "Year",
+        }
+    }
+    fn noun(self) -> &'static str {
+        match self {
+            Span::Day => "day",
+            Span::Week => "week",
+            Span::Month => "month",
+            Span::Year => "year",
+        }
+    }
+}
+
+/// One bar: its axis label, what the tooltip line says about it, and its minutes (None: future).
+struct Bucket {
+    axis: String,
+    title: String,
+    minutes: Option<u32>,
+}
+
+/// What a period shows: its name, its bars, and the days it covers up to today.
+struct Period {
+    name: String,
+    /// Minutes in the whole period (a day's total even before hourly detail was kept).
+    total: u32,
+    buckets: Vec<Bucket>,
+    days: Vec<chrono::NaiveDate>,
+}
+
+fn add_months(d: chrono::NaiveDate, months: i32) -> chrono::NaiveDate {
+    use chrono::Datelike;
+    let m = d.year() * 12 + d.month0() as i32 + months;
+    chrono::NaiveDate::from_ymd_opt(m.div_euclid(12), m.rem_euclid(12) as u32 + 1, 1).unwrap_or(d)
+}
+
+fn period(span: Span, offset: i32, today: chrono::NaiveDate, by_day: &std::collections::HashMap<chrono::NaiveDate, api::DayHistory>) -> Period {
+    let mut p = period_buckets(span, offset, today, by_day);
+    if span != Span::Day {
+        p.total = p.buckets.iter().filter_map(|b| b.minutes).sum();
+    }
+    p
+}
+
+fn period_buckets(span: Span, offset: i32, today: chrono::NaiveDate, by_day: &std::collections::HashMap<chrono::NaiveDate, api::DayHistory>) -> Period {
+    use chrono::{Datelike, Duration, NaiveDate};
+    let minutes = |d: NaiveDate| (d <= today).then(|| by_day.get(&d).map_or(0, |h| h.minutes));
+    let span_days = |start: NaiveDate, end: NaiveDate| -> Vec<NaiveDate> {
+        start.iter_days().take_while(|d| *d < end && *d <= today).collect()
+    };
+    match span {
+        Span::Day => {
+            let day = today + Duration::days(offset as i64);
+            let hours = by_day.get(&day).map(|h| h.hours.clone()).unwrap_or_default();
+            let now_hour = chrono::Timelike::hour(&chrono::Local::now()) as usize;
+            Period {
+                total: by_day.get(&day).map_or(0, |h| h.minutes),
+                name: match offset {
+                    0 => "Today".into(),
+                    -1 => "Yesterday".into(),
+                    _ => day.format("%A, %b %-d").to_string(),
+                },
+                buckets: (0..24)
+                    .map(|h| Bucket {
+                        axis: if h % 6 == 0 { hour_short(h) } else { String::new() },
+                        title: format!("{}\u{2013}{}", hour_label(h), hour_label((h + 1) % 24)),
+                        minutes: (day < today || h <= now_hour).then(|| hours.get(h).copied().unwrap_or(0)),
+                    })
+                    .collect(),
+                days: span_days(day, day + Duration::days(1)),
+            }
+        }
+        Span::Week => {
+            let start = today - Duration::days(today.weekday().num_days_from_sunday() as i64) + Duration::days(7 * offset as i64);
+            let end = start + Duration::days(6);
+            Period {
+                total: 0,
+                name: match offset {
+                    0 => "This week".into(),
+                    -1 => "Last week".into(),
+                    _ => format!("{} \u{2013} {}", start.format("%b %-d"), end.format("%b %-d")),
+                },
+                buckets: start
+                    .iter_days()
+                    .take(7)
+                    .map(|d| Bucket { axis: d.format("%a").to_string(), title: d.format("%A, %b %-d").to_string(), minutes: minutes(d) })
+                    .collect(),
+                days: span_days(start, start + Duration::days(7)),
+            }
+        }
+        Span::Month => {
+            let start = add_months(today.with_day(1).unwrap_or(today), offset);
+            let next = add_months(start, 1);
+            Period {
+                total: 0,
+                name: start.format("%B %Y").to_string(),
+                buckets: start
+                    .iter_days()
+                    .take_while(|d| *d < next)
+                    .map(|d| Bucket {
+                        axis: if d.day() == 1 || d.day() % 7 == 0 { d.day().to_string() } else { String::new() },
+                        title: d.format("%a, %b %-d").to_string(),
+                        minutes: minutes(d),
+                    })
+                    .collect(),
+                days: span_days(start, next),
+            }
+        }
+        Span::Year => {
+            let year = today.year() + offset;
+            Period {
+                total: 0,
+                name: year.to_string(),
+                buckets: (1..=12)
+                    .map(|m| {
+                        let start = NaiveDate::from_ymd_opt(year, m, 1).unwrap_or(today);
+                        let next = add_months(start, 1);
+                        let total = (start <= today).then(|| span_days(start, next).iter().filter_map(|d| minutes(*d)).sum());
+                        Bucket { axis: start.format("%b").to_string()[..1].to_string(), title: start.format("%B %Y").to_string(), minutes: total }
+                    })
+                    .collect(),
+                days: span_days(NaiveDate::from_ymd_opt(year, 1, 1).unwrap_or(today), NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap_or(today)),
+            }
+        }
+    }
+}
+
+/// A round axis top above `max` minutes, in steps a parent reads at a glance.
+fn axis_top(max: u32) -> u32 {
+    [20, 30, 60, 90, 120, 180, 240, 360, 480, 600, 900, 1200, 1800, 2400, 3600, 6000, 9000, 12000, 18000]
+        .into_iter()
+        .find(|t| *t >= max)
+        .unwrap_or(max)
+}
+
 #[component]
 fn HistoryView() -> impl IntoView {
     let ctx = ctx();
     let kids = RwSignal::new(None::<Vec<api::KidHistory>>);
+    let kid = RwSignal::new(0usize);
+    let span = RwSignal::new(Span::Week);
+    let offset = RwSignal::new(0i32);
     spawn_local(async move {
-        match api::history(28).await {
+        match api::history(800).await {
             Ok(h) => kids.set(Some(h)),
             Err(ApiError::Unauthorized) => ctx.set_auth(Auth::SignedOut),
             Err(e) => ctx.say(e.to_string(), false),
@@ -598,93 +750,151 @@ fn HistoryView() -> impl IntoView {
         {move || match kids.get() {
             None => view! { <p class="muted">"Loading\u{2026}"</p> }.into_any(),
             Some(k) if k.is_empty() => view! { <p class="empty">"No kids yet."</p> }.into_any(),
-            Some(k) => view! {
-                <div class="grid">{k.into_iter().map(|kid| view! { <KidHistoryCard kid=kid/> }).collect_view()}</div>
-            }.into_any(),
+            Some(k) => {
+                let names: Vec<String> = k.iter().map(|k| k.name.clone()).collect();
+                view! {
+                    <div class="history-controls">
+                        {(names.len() > 1).then(|| view! {
+                            <div class="segmented" role="tablist" aria-label="Kid">
+                                {names.into_iter().enumerate().map(|(i, n)| view! {
+                                    <button role="tab" aria-selected=move || (kid.get() == i).to_string()
+                                        class:on=move || kid.get() == i on:click=move |_| kid.set(i)>{n}</button>
+                                }).collect_view()}
+                            </div>
+                        })}
+                        <div class="segmented" role="tablist" aria-label="Period">
+                            {Span::ALL.into_iter().map(|s| view! {
+                                <button role="tab" aria-selected=move || (span.get() == s).to_string()
+                                    class:on=move || span.get() == s
+                                    on:click=move |_| { span.set(s); offset.set(0); }>{s.label()}</button>
+                            }).collect_view()}
+                        </div>
+                    </div>
+                    {move || {
+                        let k = kids.get().unwrap_or_default();
+                        k.get(kid.get().min(k.len().saturating_sub(1))).cloned()
+                            .map(|kid| view! { <HistoryPanel kid=kid span=span.get() offset=offset/> })
+                    }}
+                }.into_any()
+            }
         }}
     }
 }
 
-/// A kid's last four weeks: weekly totals, the last seven days, and one day hour by hour.
 #[component]
-fn KidHistoryCard(kid: api::KidHistory) -> impl IntoView {
-    use chrono::Datelike;
-    let days = kid.days;
-    let n = days.len();
-    // Calendar weeks, Sunday first, like a wall calendar: (total, days counted so far).
-    let today = days.last().map(|d| d.day).unwrap_or_default();
-    let this_sunday = today - chrono::Duration::days(today.weekday().num_days_from_sunday() as i64);
-    let week = |back: i64| -> (u32, u32) {
-        let start = this_sunday - chrono::Duration::days(7 * back);
-        let end = (start + chrono::Duration::days(7)).min(today + chrono::Duration::days(1));
-        let total = days.iter().filter(|d| d.day >= start && d.day < end).map(|d| d.minutes).sum();
-        (total, (end - start).num_days() as u32)
-    };
-    let weeks: Vec<(u32, u32)> = (0..4).map(week).collect();
-    let last7: Vec<api::DayHistory> = days[n.saturating_sub(7)..].to_vec();
-    let selected = RwSignal::new(last7.len().saturating_sub(1));
-    let day_max = last7.iter().map(|d| d.minutes).max().unwrap_or(0).max(60);
-    let week_label = |i: usize| match i {
-        0 => "This week".to_string(),
-        1 => "Last week".to_string(),
-        i => format!("{i} weeks ago"),
-    };
-    let bars = last7.clone();
-    let detail = last7.clone();
-    view! {
-        <article class="card history">
-            <strong>{kid.name}</strong>
-            <ul class="weeks">
-                {weeks.iter().enumerate().map(|(i, (m, counted))| view! {
-                    <li>
-                        <span class="muted small">{week_label(i)}</span>
-                        <b>{fmt_minutes(*m)}</b>
-                        <span class="muted small">{format!("{} a day", fmt_minutes(m / (*counted).max(1)))}</span>
-                    </li>
-                }).collect_view()}
-            </ul>
-            <div class="label">"Last 7 days"</div>
-            <div class="bars days">
-                {bars.into_iter().enumerate().map(|(i, d)| {
-                    let height = format!("height: {}%", (d.minutes * 100 / day_max).max(if d.minutes > 0 { 3 } else { 0 }));
-                    let title = format!("{}: {}", d.day.format("%a %b %-d"), fmt_minutes(d.minutes));
-                    view! {
-                        <button class="bar-col" class:sel=move || selected.get() == i title=title.clone()
-                            aria-label=title on:click=move |_| selected.set(i)>
-                            <span class="bar-value">{if d.minutes > 0 { short_minutes(d.minutes) } else { String::new() }}</span>
-                            <span class="bar" style=height></span>
-                            <span class="bar-label">{d.day.format("%a").to_string()}</span>
-                        </button>
-                    }
-                }).collect_view()}
-            </div>
-            {move || {
-                let d = detail[selected.get().min(detail.len().saturating_sub(1))].clone();
-                let hour_max = d.hours.iter().copied().max().unwrap_or(0).max(15);
-                let recorded: u32 = d.hours.iter().sum();
-                view! {
-                    <div class="label spaced">{format!("{} \u{00b7} {}", d.day.format("%A %b %-d"), fmt_minutes(d.minutes))}</div>
-                    {if recorded == 0 && d.minutes > 0 {
-                        view! { <p class="muted small">"No hour-by-hour detail for this day: it's only kept from the day it was turned on."</p> }.into_any()
-                    } else {
-                        view! {
-                            <div class="bars hours">
-                                {d.hours.iter().enumerate().map(|(h, m)| {
-                                    let height = format!("height: {}%", (m * 100 / hour_max).max(if *m > 0 { 4 } else { 0 }));
-                                    view! { <span class="bar" style=height title=format!("{}: {}", hour_label(h), fmt_minutes(*m))></span> }
-                                }).collect_view()}
-                            </div>
-                            <div class="hour-axis muted small"><span>"12a"</span><span>"6a"</span><span>"12p"</span><span>"6p"</span><span>"12a"</span></div>
-                        }.into_any()
-                    }}
-                }
-            }}
-        </article>
+fn HistoryPanel(kid: api::KidHistory, span: Span, offset: RwSignal<i32>) -> impl IntoView {
+    let today = kid.days.last().map(|d| d.day).unwrap_or_default();
+    let first_day = kid.days.iter().find(|d| d.minutes > 0).map(|d| d.day).unwrap_or(today);
+    let by_day: std::collections::HashMap<_, _> = kid.days.into_iter().map(|d| (d.day, d)).collect();
+    let hovered = RwSignal::new(None::<usize>);
+    move || {
+        let off = offset.get();
+        let p = period(span, off, today, &by_day);
+        let prev = period(span, off - 1, today, &by_day);
+        let (total, prev_total) = (p.total, prev.total);
+        // Averages count only days that have happened; a whole earlier period counts in full.
+        let counted = p.days.len().max(1) as u32;
+        let average = total / counted;
+        let busiest = p.buckets.iter().filter(|b| b.minutes.unwrap_or(0) > 0).max_by_key(|b| b.minutes);
+        let can_go_back = p.days.first().is_some_and(|d| *d > first_day) || p.days.is_empty();
+        let top = axis_top(p.buckets.iter().filter_map(|b| b.minutes).max().unwrap_or(0));
+        let change = (prev_total > 0).then(|| (total as f64 - prev_total as f64) / prev_total as f64 * 100.0);
+        let tiles = [
+            ("Total", fmt_minutes(total), None),
+            (if span == Span::Day { "Busiest hour" } else { "Daily average" },
+             if span == Span::Day { busiest.map_or("\u{2014}".into(), |b| b.title.clone()) } else { fmt_minutes(average) },
+             None),
+            (match span { Span::Year => "Busiest month", Span::Day => "Hours used", _ => "Busiest day" },
+             match span {
+                 Span::Day => p.buckets.iter().filter(|b| b.minutes.unwrap_or(0) > 0).count().to_string(),
+                 // "November", not "November 2026": the year is in the heading.
+                 Span::Year => busiest.map_or("\u{2014}".into(), |b| b.title.split(' ').next().unwrap_or_default().to_string()),
+                 _ => busiest.map_or("\u{2014}".into(), |b| b.title.clone()),
+             },
+             None),
+            ("vs previous", change.map_or("\u{2014}".into(), |c| format!("{}{:.0}%", if c > 0.0 { "+" } else { "" }, c)),
+             Some(format!("{} {}", fmt_minutes(prev_total), match (span, off) {
+                 (Span::Day, 0) => "yesterday".to_string(),
+                 (_, 0) => format!("last {}", span.noun()),
+                 _ => format!("the {} before", span.noun()),
+             }))),
+        ];
+        // Only the hint and the highlighted bar follow the pointer; rebuilding the chart on hover
+        // would put a new bar under the pointer, which fires another hover, forever.
+        let details: Vec<String> = p
+            .buckets
+            .iter()
+            .map(|b| format!("{} \u{00b7} {}", b.title, b.minutes.map_or("\u{2014}".into(), fmt_minutes)))
+            .collect();
+        let hint_text = move || hovered.get().and_then(|i| details.get(i).cloned()).unwrap_or_else(|| "Tap a bar for details".into());
+        let hover = move |i: Option<usize>| {
+            if hovered.get_untracked() != i {
+                hovered.set(i);
+            }
+        };
+        let dense = p.buckets.len() > 14;
+        view! {
+            <section class="card history-panel">
+                <div class="period-nav">
+                    <button class="ghost icon" aria-label="Earlier" disabled={!can_go_back}
+                        on:click=move |_| { hovered.set(None); offset.update(|o| *o -= 1); }>"\u{2039}"</button>
+                    <h3>{p.name.clone()}</h3>
+                    <button class="ghost icon" aria-label="Later" disabled={off >= 0}
+                        on:click=move |_| { hovered.set(None); offset.update(|o| *o += 1); }>"\u{203a}"</button>
+                </div>
+                <div class="stat-tiles">
+                    {tiles.into_iter().map(|(label, value, sub)| view! {
+                        <div class="stat">
+                            <span class="stat-label">{label}</span>
+                            <span class="stat-value">{value}</span>
+                            {sub.map(|s| view! { <span class="stat-sub">{s}</span> })}
+                        </div>
+                    }).collect_view()}
+                </div>
+                <div class="chart" class:dense=dense>
+                    <div class="chart-grid" aria-hidden="true">
+                        <span><i>{short_minutes(top)}</i></span>
+                        <span><i>{short_minutes(top / 2)}</i></span>
+                        <span><i>"0"</i></span>
+                    </div>
+                    <div class="chart-bars" on:pointerleave=move |_| hover(None)>
+                        {p.buckets.iter().enumerate().map(|(i, b)| {
+                            let pct = b.minutes.map_or(0, |m| if m == 0 { 0 } else { (m * 100 / top.max(1)).max(2) });
+                            let label = format!("{}: {}", b.title, b.minutes.map_or("not yet".into(), fmt_minutes));
+                            view! {
+                                <button class="col" class:future=b.minutes.is_none() class:on=move || hovered.get() == Some(i)
+                                    aria-label=label on:pointerenter=move |_| hover(Some(i)) on:click=move |_| hover(Some(i))>
+                                    <span class="bar" style=format!("height: {pct}%")></span>
+                                </button>
+                            }
+                        }).collect_view()}
+                    </div>
+                    <div class="chart-axis" aria-hidden="true">
+                        {p.buckets.iter().map(|b| view! { <span>{b.axis.clone()}</span> }).collect_view()}
+                    </div>
+                </div>
+                <p class="chart-hint">{hint_text}</p>
+            </section>
+        }
     }
 }
 
 fn short_minutes(m: u32) -> String {
-    if m < 60 { format!("{m}m") } else { format!("{:.1}h", m as f32 / 60.0).replace(".0h", "h") }
+    match m {
+        0 => "0".into(),
+        m if m < 60 => format!("{m}m"),
+        m if m % 60 == 0 => format!("{}h", m / 60),
+        m => format!("{:.1}h", m as f32 / 60.0),
+    }
+}
+
+fn hour_short(h: usize) -> String {
+    match h {
+        0 => "12a".into(),
+        12 => "12p".into(),
+        h if h < 12 => format!("{h}a"),
+        h => format!("{}p", h - 12),
+    }
 }
 
 fn hour_label(h: usize) -> String {
@@ -1162,5 +1372,28 @@ fn AccountView() -> impl IntoView {
             <p class="muted small">"Signs out this device only."</p>
             <button class="ghost" on:click=logout>"Sign out"</button>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn every_period_is_built_quickly() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let by_day: std::collections::HashMap<_, _> = (0..800)
+            .map(|i| {
+                let day = today - chrono::Duration::days(i);
+                (day, api::DayHistory { day, minutes: (i % 90) as u32, hours: vec![1; 24] })
+            })
+            .collect();
+        for span in Span::ALL {
+            for offset in [-3, -1, 0] {
+                let p = period(span, offset, today, &by_day);
+                assert!(!p.buckets.is_empty());
+            }
+        }
+        assert_eq!(axis_top(0), 20);
     }
 }
