@@ -46,6 +46,9 @@ impl AppState {
     }
 }
 
+/// Response header carrying the web UI's version (its ETag).
+pub const UI_VERSION_HEADER: &str = "x-screentime-ui";
+
 const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
     img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
@@ -60,10 +63,12 @@ pub fn router(state: AppState) -> Router {
         .merge(admin::routes())
         .merge(request_page::routes())
         .with_state(state);
+    let mut ui_version = None;
     match web_dir {
         Some(dir) => {
             let index = tower_http::services::ServeFile::new(dir.join("index.html"));
             let etag = web_etag(&dir);
+            ui_version = Some(etag.clone());
             let files = tower_http::services::ServeDir::new(&dir).fallback(index);
             app = app.fallback_service(
                 tower::ServiceBuilder::new()
@@ -76,6 +81,11 @@ pub fn router(state: AppState) -> Router {
     let header = |name: HeaderName, value: &'static str| {
         SetResponseHeaderLayer::if_not_present(name, HeaderValue::from_static(value))
     };
+    // Every reply names the web UI it goes with, so a page left open across an upgrade notices
+    // and reloads instead of misreading the new API.
+    if let Some(v) = ui_version {
+        app = app.layer(SetResponseHeaderLayer::overriding(HeaderName::from_static(UI_VERSION_HEADER), v));
+    }
     app.layer(header(header::CONTENT_SECURITY_POLICY, CSP))
         .layer(header(header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
         // Notification links carry tokens in the path, so never leak them in a Referer.

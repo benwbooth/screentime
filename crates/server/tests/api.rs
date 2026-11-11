@@ -613,6 +613,12 @@ async fn web_ui_revalidates_by_content_not_date() {
     let s2 = server(Config { web_dir: Some(web.path().into()), ..Config::default() }).await;
     let req = Request::get("/").header(header::IF_NONE_MATCH, &etag).body(Body::empty()).unwrap();
     assert_eq!(s2.app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    // API replies carry the UI version too, so a page from the old build knows to reload.
+    let api = |s: &TestServer| s.app.clone().oneshot(Request::get("/api/overview").body(Body::empty()).unwrap());
+    let v1 = api(&s).await.unwrap().headers()["x-screentime-ui"].to_str().unwrap().to_owned();
+    let v2 = api(&s2).await.unwrap().headers()["x-screentime-ui"].to_str().unwrap().to_owned();
+    assert_eq!(v1, etag);
+    assert_ne!(v1, v2);
 }
 
 #[tokio::test]

@@ -147,8 +147,36 @@ impl std::fmt::Display for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
+thread_local! {
+    /// The UI version the server named in its first reply since this page loaded.
+    static UI_VERSION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The server was upgraded while this page was open: load the new UI rather than misread the
+/// new API with the old one. Returns true when a reload is under way.
+fn reload_if_upgraded(resp: &Response) -> bool {
+    let Some(version) = resp.headers().get("x-screentime-ui") else { return false };
+    let upgraded = UI_VERSION.with(|v| {
+        let mut v = v.borrow_mut();
+        match v.as_deref() {
+            None => {
+                *v = Some(version);
+                false
+            }
+            Some(old) => old != version,
+        }
+    });
+    if upgraded && let Some(w) = web_sys::window() {
+        let _ = w.location().reload();
+    }
+    upgraded
+}
+
 async fn check(resp: Result<Response, gloo_net::Error>) -> ApiResult<Response> {
     let resp = resp.map_err(|e| ApiError::Message(format!("Can't reach the server ({e}).")))?;
+    if reload_if_upgraded(&resp) {
+        return Err(ApiError::Message("Screen time was updated; reloading\u{2026}".into()));
+    }
     match resp.status() {
         200..=299 => Ok(resp),
         401 => Err(ApiError::Unauthorized),
