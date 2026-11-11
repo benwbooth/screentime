@@ -73,6 +73,26 @@ run_as_builder tee "$out/ScreenTimeMenu.app/Contents/Info.plist" >/dev/null <<EO
 </dict></plist>
 EOF
 run_as_builder codesign --force -s - "$out/ScreenTimeMenu.app"
+# The agent goes in an app bundle too: macOS only lets an app with a bundle identity and a
+# reason ask for Local Network access, and without it the server on the LAN is "no route to host".
+agent_app="$out/ScreenTimeAgent.app"
+run_as_builder mkdir -p "$agent_app/Contents/MacOS"
+run_as_builder cp -f "$root/target/release/screentime-mac" "$agent_app/Contents/MacOS/"
+run_as_builder tee "$agent_app/Contents/Info.plist" >/dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>$label_agent</string>
+  <key>CFBundleName</key><string>Screen time</string>
+  <key>CFBundleExecutable</key><string>screentime-mac</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSUIElement</key><true/>
+  <key>LSBackgroundOnly</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>Screen time talks to the family's Screen time server on the home network.</string>
+</dict></plist>
+EOF
+run_as_builder codesign --force -s - "$agent_app"
 
 echo "Installing into $data..."
 uid_gui=""
@@ -90,9 +110,8 @@ fi
 pkill -x ScreenTimeMenu 2>/dev/null || true
 
 mkdir -p "$bin"
-cp -f "$root/target/release/screentime-mac" "$bin/"
-rm -rf "$bin/ScreenTimeMenu.app"
-cp -R "$out/ScreenTimeMenu.app" "$bin/"
+rm -rf "$bin/ScreenTimeMenu.app" "$bin/ScreenTimeAgent.app" "$bin/screentime-mac"
+cp -R "$out/ScreenTimeMenu.app" "$out/ScreenTimeAgent.app" "$bin/"
 printf '%s' "$token" > "$data/token"
 {
   echo "SCREENTIME_SERVER=$server"
@@ -121,7 +140,7 @@ if [ "$system" = 1 ]; then
   chown -R root:wheel "$data"
   # Others may reach the socket inside, but not list or read anything.
   chmod 711 "$data"
-  { plist $label_agent "$bin/screentime-mac"
+  { plist $label_agent "$bin/ScreenTimeAgent.app/Contents/MacOS/screentime-mac"
     echo "  <key>StandardErrorPath</key><string>$log</string>"
     echo "</dict></plist>"; } > /Library/LaunchDaemons/$label_agent.plist
   { plist $label_menu "$bin/ScreenTimeMenu.app/Contents/MacOS/ScreenTimeMenu"
@@ -136,7 +155,7 @@ else
   chmod 700 "$data"
   agents="$HOME/Library/LaunchAgents"
   mkdir -p "$agents"
-  { plist $label_agent "$bin/screentime-mac"
+  { plist $label_agent "$bin/ScreenTimeAgent.app/Contents/MacOS/screentime-mac"
     echo "  <key>StandardErrorPath</key><string>$log</string>"
     echo "  <key>LimitLoadToSessionType</key><string>Aqua</string>"
     echo "</dict></plist>"; } > "$agents/$label_agent.plist"

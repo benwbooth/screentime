@@ -266,6 +266,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with_ansi(false)
+        .with_writer(std::io::stderr)
         .init();
     if std::env::args().any(|a| a == "--lock") {
         return mac::lock_this_session();
