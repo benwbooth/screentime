@@ -11,6 +11,7 @@ pub mod error;
 pub mod notify;
 pub mod push;
 pub mod request_page;
+pub mod wifi;
 
 use axum::Router;
 use axum::http::{HeaderValue, header};
@@ -28,6 +29,7 @@ pub struct AppState {
     pub notifier: Arc<Notifier>,
     /// Recent failed admin logins, for throttling.
     pub login_failures: Arc<Mutex<Vec<Instant>>>,
+    pub wifi: Arc<wifi::Wifi>,
 }
 
 impl AppState {
@@ -38,6 +40,7 @@ impl AppState {
             config: Arc::new(config),
             notifier: Arc::new(notifier),
             login_failures: Arc::new(Mutex::new(Vec::new())),
+            wifi: Arc::new(wifi::Wifi::default()),
         }
     }
 }

@@ -3,7 +3,7 @@
 mod api;
 
 use screentime_common::{Decision, DenyReason, DowntimeWindow};
-use api::{ApiError, Overview, RequestRow, UserOverview};
+use api::{ApiError, Overview, RequestRow, UserOverview, Wifi};
 use chrono::{NaiveTime, Weekday};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -431,6 +431,7 @@ fn TodayView() -> impl IntoView {
     let requests = move || ctx.overview.with(|o| o.as_ref().map(|o| o.pending_requests.clone()).unwrap_or_default());
     let users = move || ctx.overview.with(|o| o.as_ref().map(|o| o.users.clone()).unwrap_or_default());
     let today = move || ctx.overview.with(|o| o.as_ref().map(|o| o.today)).unwrap_or_default();
+    let wifi = move || ctx.overview.with(|o| o.as_ref().and_then(|o| o.wifi.clone()));
     view! {
         <header class="page-head"><h1>"Today"</h1></header>
         <Show when=move || !requests().is_empty()>
@@ -454,6 +455,110 @@ fn TodayView() -> impl IntoView {
                 </div>
             </Show>
         </section>
+        {move || wifi().map(|w| view! {
+            <section>
+                <h2>"Wi-Fi"</h2>
+                <div class="grid"><WifiCard w=w/></div>
+            </section>
+        })}
+    }
+}
+
+const WIFI_ICON: &str = "M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01";
+
+/// Ask before a change that would turn the Wi-Fi off right now.
+fn confirm_wifi_off(w: &Wifi, enabling: bool) -> bool {
+    !(enabling && w.remaining_seconds == 0)
+        || confirm_action("There's no Wi-Fi time left, so this turns the Wi-Fi off now. Go ahead?")
+}
+
+/// The household's Wi-Fi time, styled like a kid's card.
+#[component]
+fn WifiCard(w: Wifi) -> impl IntoView {
+    let ctx = ctx();
+    let left = if w.remaining_minutes <= 0 {
+        "No Wi-Fi time left".to_string()
+    } else {
+        format!("{} left", fmt_minutes(w.remaining_minutes as u32))
+    };
+    let tone = match (w.enabled, w.remaining_minutes) {
+        (false, _) => "",
+        (true, 0) => "off",
+        (true, m) if m <= 10 => "warn",
+        _ => "ok",
+    };
+    let state = match w.router.on {
+        Some(true) => Some("Wi-Fi is on".to_string()),
+        Some(false) => Some("Wi-Fi is off".to_string()),
+        None if w.enabled && w.router.last_error.is_some() => Some("Wi-Fi state unknown".to_string()),
+        None if w.enabled => Some("Checking the router\u{2026}".to_string()),
+        None => None,
+    };
+    let switching = match (w.wanted_on, w.router.on) {
+        (Some(want), now) if now != Some(want) && now.is_some() && w.router.last_error.is_none() => {
+            Some(format!("Turning Wi-Fi {}\u{2026}", if want { "on" } else { "off" }))
+        }
+        _ => None,
+    };
+    let setup = if !w.password_set {
+        Some("Not set up: add the router password under Account".to_string())
+    } else if !w.enabled {
+        Some("Paused: not counting down or switching the Wi-Fi".to_string())
+    } else {
+        None
+    };
+    let details = [state, switching, setup];
+    let error = w.router.last_error.clone().map(|e| {
+        let when = w.router.last_error_at.as_deref().map(local_time).unwrap_or_default();
+        format!("Router: {e} ({when})")
+    });
+    let adjust = move |minutes: i64| {
+        let done = if minutes > 0 { format!("Added {minutes} minutes of Wi-Fi") } else { "Took Wi-Fi time away".to_string() };
+        ctx.act(done, api::add_wifi_time(minutes))
+    };
+    let add = Callback::new(move |m: u32| adjust(m as i64));
+    let take = Callback::new(move |m: u32| adjust(-(m as i64)));
+    let toggle = {
+        let w = w.clone();
+        move |_| {
+            let enabling = !w.enabled;
+            if !confirm_wifi_off(&w, enabling) {
+                return;
+            }
+            let done = if enabling { "Wi-Fi time is on" } else { "Wi-Fi time is paused" };
+            ctx.act(done, api::set_wifi(Some(enabling), None, None, None))
+        }
+    };
+    view! {
+        <article class="card kid wifi">
+            <div class="kid-head">
+                <span class="avatar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d=WIFI_ICON/></svg></span>
+                <div>
+                    <strong>"Everyone"</strong>
+                    <div class=format!("status big {tone}")>{left}</div>
+                </div>
+            </div>
+            <ul class="facts">{details.into_iter().flatten().map(|d| view! { <li>{d}</li> }).collect_view()}</ul>
+            {error.map(|e| view! { <p class="error small">{e}</p> })}
+            <div class="label">"Add Wi-Fi time"</div>
+            <MinutePicker on_pick=add/>
+            <div class="label spaced">"Take Wi-Fi time away"</div>
+            <MinutePicker on_pick=take minus=true/>
+            {w.password_set.then(|| view! {
+                <div class="label spaced">"Wi-Fi time"</div>
+                <div class="picker">
+                    <button class="chip" class:suggested=!w.enabled on:click=toggle>
+                        {if w.enabled { "Pause Wi-Fi time" } else { "Start Wi-Fi time" }}
+                    </button>
+                    <button class="chip" on:click=move |_| ctx.tab.set(Tab::Account)>"Router settings"</button>
+                </div>
+            })}
+            {(!w.password_set).then(|| view! {
+                <div class="picker spaced">
+                    <button class="chip" on:click=move |_| ctx.tab.set(Tab::Account)>"Set up the router"</button>
+                </div>
+            })}
+        </article>
     }
 }
 
@@ -1425,11 +1530,102 @@ fn AccountView() -> impl IntoView {
                 </button>
             </div>
         </form>
+        <WifiSettings/>
         <div class="card">
             <h3>"Sign out"</h3>
             <p class="muted small">"Signs out this device only."</p>
             <button class="ghost" on:click=logout>"Sign out"</button>
         </div>
+    }
+}
+
+/// The router that Wi-Fi time switches. The password is write-only: the page only learns
+/// whether one is saved.
+#[component]
+fn WifiSettings() -> impl IntoView {
+    let ctx = ctx();
+    let current = move || ctx.overview.with(|o| o.as_ref().and_then(|o| o.wifi.clone()));
+    let start = current();
+    let url = RwSignal::new(start.as_ref().map(|w| w.router_url.clone()).unwrap_or_else(|| "http://192.168.1.1".into()));
+    let user = RwSignal::new(start.as_ref().map(|w| w.router_user.clone()).unwrap_or_else(|| "admin".into()));
+    let password = RwSignal::new(String::new());
+    let enabled = RwSignal::new(start.as_ref().is_some_and(|w| w.enabled));
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let password_set = move || current().is_some_and(|w| w.password_set);
+
+    let save = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let Some(w) = current() else { return };
+        let pw = password.get_untracked();
+        let enabling = enabled.get_untracked();
+        if enabling && !w.password_set && pw.is_empty() {
+            error.set(Some("Enter the router password first.".into()));
+            return;
+        }
+        if enabling && !w.enabled && !confirm_wifi_off(&w, true) {
+            return;
+        }
+        error.set(None);
+        busy.set(true);
+        spawn_local(async move {
+            let pw = (!pw.is_empty()).then_some(pw);
+            let result = api::set_wifi(
+                Some(enabling),
+                Some(&url.get_untracked()),
+                Some(&user.get_untracked()),
+                pw.as_deref(),
+            )
+            .await;
+            match result {
+                Ok(()) => {
+                    password.set(String::new());
+                    ctx.say("Wi-Fi settings saved", true);
+                    ctx.refresh();
+                }
+                Err(ApiError::Unauthorized) => ctx.set_auth(Auth::SignedOut),
+                Err(e) => error.set(Some(e.to_string())),
+            }
+            busy.set(false);
+        });
+    };
+    let forget = move |_| {
+        if confirm_action("Forget the router password? Wi-Fi time stops switching the Wi-Fi.") {
+            enabled.set(false);
+            ctx.act("Router password forgotten", api::set_wifi(Some(false), None, None, Some("")));
+        }
+    };
+
+    view! {
+        <form class="card form" on:submit=save autocomplete="off">
+            <h3>"Wi-Fi router"</h3>
+            <p class="muted small">"Wi-Fi time turns the router's 2.4 GHz and 5 GHz Wi-Fi off when it runs out, and back on when you add time. Netgear Nighthawk RS200."</p>
+            <label for="router-url">"Router address"</label>
+            <input id="router-url" type="text" inputmode="url" required autocomplete="off" spellcheck="false"
+                prop:value=move || url.get() on:input=move |ev| url.set(event_target_value(&ev))/>
+            <label for="router-user">"Router username"</label>
+            <input id="router-user" type="text" required autocomplete="off" spellcheck="false"
+                prop:value=move || user.get() on:input=move |ev| user.set(event_target_value(&ev))/>
+            <label for="router-password">"Router password"</label>
+            <input id="router-password" type="password" autocomplete="new-password"
+                placeholder=move || if password_set() { "Saved (leave blank to keep it)" } else { "Not set" }
+                prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev))/>
+            <p class="muted small">{move || if password_set() { "A router password is saved on the server." } else { "No router password saved yet." }}</p>
+            <label class="switch wide">
+                <input type="checkbox" prop:checked=move || enabled.get()
+                    on:change=move |ev| enabled.set(event_target_checked(&ev))/>
+                <span>"Use Wi-Fi time (turn the Wi-Fi off when it runs out)"</span>
+            </label>
+            {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
+            <div class="row">
+                <button class="primary" disabled=move || busy.get()>
+                    {move || if busy.get() { "Saving…" } else { "Save" }}
+                </button>
+                <Show when=password_set>
+                    <button type="button" class="ghost danger" on:click=forget>"Forget password"</button>
+                </Show>
+            </div>
+        </form>
     }
 }
 

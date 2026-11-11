@@ -78,6 +78,7 @@ async fn serve() -> Result<()> {
     let tls = config.tls.clone();
     let state = AppState::new(pool, config);
     tokio::spawn(screentime_server::notify::follow_replies(state.clone()));
+    tokio::spawn(screentime_server::wifi::run(state.clone()));
     let app = router(state).into_make_service();
 
     match tls {

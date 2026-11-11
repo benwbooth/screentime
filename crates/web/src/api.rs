@@ -64,6 +64,29 @@ pub struct Overview {
     pub users: Vec<UserOverview>,
     pub pending_requests: Vec<RequestRow>,
     pub clients: Vec<ClientRow>,
+    #[serde(default)]
+    pub wifi: Option<Wifi>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RouterStatus {
+    pub on: Option<bool>,
+    pub last_changed_at: Option<String>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<String>,
+}
+
+/// The household's Wi-Fi time. The router password itself never comes back, only whether it's set.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Wifi {
+    pub enabled: bool,
+    pub password_set: bool,
+    pub router_url: String,
+    pub router_user: String,
+    pub remaining_seconds: i64,
+    pub remaining_minutes: i64,
+    pub wanted_on: Option<bool>,
+    pub router: RouterStatus,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -245,4 +268,25 @@ pub async fn push_test() -> ApiResult<usize> {
     }
     let d: Delivered = json(send("POST", "/api/push/test", &serde_json::json!({})).await?).await?;
     Ok(d.delivered)
+}
+
+/// Positive adds Wi-Fi time, negative takes it away.
+pub async fn add_wifi_time(minutes: i64) -> ApiResult<()> {
+    send("POST", "/api/wifi/time", &serde_json::json!({ "minutes": minutes })).await.map(drop)
+}
+
+/// Change Wi-Fi settings; fields left `None` keep their saved values.
+pub async fn set_wifi(
+    enabled: Option<bool>,
+    router_url: Option<&str>,
+    router_user: Option<&str>,
+    router_password: Option<&str>,
+) -> ApiResult<()> {
+    let body = serde_json::json!({
+        "enabled": enabled,
+        "router_url": router_url,
+        "router_user": router_user,
+        "router_password": router_password,
+    });
+    send("PUT", "/api/wifi/settings", &body).await.map(drop)
 }

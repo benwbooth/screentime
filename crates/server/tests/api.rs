@@ -708,3 +708,157 @@ async fn a_new_request_replaces_the_kids_older_one() {
     let tag = screentime_server::push::request_payload(&new, String::new(), &[]).tag;
     assert_eq!(tag.as_deref(), Some("request-kid"));
 }
+
+/// A stand-in for the Netgear router's web admin: one password, a session cookie, the Advanced
+/// Wireless page with its one-time token, and the form post that switches the radios.
+#[derive(Default)]
+struct FakeRouter {
+    /// wl_enable_router of each accepted change, in order.
+    changes: Vec<String>,
+    logins: u32,
+    logouts: u32,
+}
+
+async fn fake_router(password: &'static str) -> (String, Arc<Mutex<FakeRouter>>) {
+    use axum::extract::Request as AxRequest;
+    use base64ct::{Base64, Encoding};
+    let seen = Arc::new(Mutex::new(FakeRouter::default()));
+    let state = seen.clone();
+    let handler = move |req: AxRequest| {
+        let seen = state.clone();
+        async move {
+            let path = req.uri().path().to_owned();
+            let query = req.uri().query().unwrap_or("").to_owned();
+            let cookie = req.headers().get(header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+            let signed_in = cookie.contains("sess=good");
+            let body = String::from_utf8(req.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+            let form: Vec<(String, String)> = serde_urlencoded::from_str(&body).unwrap_or_default();
+            let field = |k: &str| form.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+            let ok = |extra: Option<&str>, html: String| {
+                let mut r = axum::response::Response::builder().status(200);
+                if let Some(c) = extra {
+                    r = r.header(header::SET_COOKIE, c);
+                }
+                r.body(Body::from(html)).unwrap()
+            };
+            match (path.as_str(), query.as_str()) {
+                ("/apply.cgi", "%20timestamp=undefined") => {
+                    seen.lock().unwrap().logins += 1;
+                    let outer = String::from_utf8(Base64::decode_vec(&field("password")).unwrap()).unwrap();
+                    let inner = Base64::decode_vec(&outer[1..outer.len() - 1]).unwrap();
+                    let good = field("submit_flag") == "admin_login" && field("username") == "admin" && inner == password.as_bytes();
+                    ok(good.then_some("sess=good; path=/"), "<html>ok</html>".into())
+                }
+                ("/WLG_adv.htm", _) if signed_in => {
+                    ok(None, r#"<form action="/apply.cgi?/WLG_adv.htm timestamp=99887766" method="post">"#.into())
+                }
+                ("/WLG_adv.htm", _) => ok(None, r#"<input type="password" name="password">"#.into()),
+                ("/apply.cgi", "/WLG_adv.htm%20timestamp=99887766") if signed_in => {
+                    assert_eq!(field("wla_enable_router"), field("wl_enable_router"));
+                    assert_eq!(field("wla_6g_enable_router"), "1");
+                    seen.lock().unwrap().changes.push(field("wl_enable_router"));
+                    ok(None, "<html>applied</html>".into())
+                }
+                ("/LGO_logout.htm", _) => {
+                    seen.lock().unwrap().logouts += 1;
+                    ok(None, String::new())
+                }
+                _ => axum::response::Response::builder().status(400).body(Body::empty()).unwrap(),
+            }
+        }
+    };
+    let app = Router::new().fallback(handler);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), seen)
+}
+
+async fn wait_for(mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("timed out");
+}
+
+#[tokio::test]
+async fn wifi_time_switches_the_router() {
+    let s = server(with_password()).await;
+    let me = s.admin_cookie().await;
+    let me = Some(me.as_str());
+    let (url, router) = fake_router("router secret").await;
+    tokio::spawn(screentime_server::wifi::run(s.state.clone()));
+
+    // Off and unconfigured to start with: nothing touches the router.
+    let (status, _, body) = s.call("GET", "/api/wifi", me, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let w: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!((w["enabled"].as_bool(), w["password_set"].as_bool(), w["remaining_seconds"].as_i64()), (Some(false), Some(false), Some(0)));
+    assert_eq!(w["wanted_on"], Value::Null);
+    let (status, _, body) = s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": true}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(json!({"router_url": "ftp://x"}))).await.0, StatusCode::BAD_REQUEST);
+
+    // Time added before it's turned on waits, without running down.
+    s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": 30}))).await;
+    let settings = json!({"router_url": url, "router_user": "admin", "router_password": "router secret"});
+    let (status, _, body) = s.call("PUT", "/api/wifi/settings", me, Some(settings)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("router secret"), "the password never goes back to the browser");
+    let w: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!((w["password_set"].as_bool(), w["remaining_minutes"].as_i64()), (Some(true), Some(30)));
+    assert!(router.lock().unwrap().logins == 0);
+
+    // Turned on with time left: Wi-Fi on.
+    s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": true}))).await;
+    wait_for(|| router.lock().unwrap().changes == ["1"]).await;
+    // Taking away more than is left stops at zero and switches it off.
+    let (_, _, body) = s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": -45}))).await;
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["remaining_seconds"], 0);
+    wait_for(|| router.lock().unwrap().changes == ["1", "0"]).await;
+    let (_, _, body) = s.call("GET", "/api/overview", me, None).await;
+    let o: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(o["wifi"]["router"]["on"], false);
+    assert_eq!(o["wifi"]["wanted_on"], false);
+    // Adding time turns it back on.
+    s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": 15}))).await;
+    wait_for(|| router.lock().unwrap().changes == ["1", "0", "1"]).await;
+    // Every login was followed by a logout.
+    wait_for(|| { let r = router.lock().unwrap(); r.logins == r.logouts }).await;
+    let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
+    assert!(w["remaining_seconds"].as_i64().unwrap() > 14 * 60);
+    assert_eq!(w["router"]["last_error"], Value::Null);
+    // Turning Wi-Fi time off while the server had the Wi-Fi off turns it back on.
+    s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": -15}))).await;
+    wait_for(|| router.lock().unwrap().changes.len() == 4).await;
+    s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": false}))).await;
+    wait_for(|| router.lock().unwrap().changes == ["1", "0", "1", "0", "1"]).await;
+}
+
+#[tokio::test]
+async fn wifi_reports_a_refused_router_login() {
+    let s = server(with_password()).await;
+    let me = s.admin_cookie().await;
+    let me = Some(me.as_str());
+    let (url, router) = fake_router("router secret").await;
+    tokio::spawn(screentime_server::wifi::run(s.state.clone()));
+    let settings = json!({"router_url": url, "router_password": "wrong", "enabled": true});
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(settings)).await.0, StatusCode::OK);
+    let mut error = Value::Null;
+    for _ in 0..200 {
+        let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
+        error = w["router"]["last_error"].clone();
+        if !error.is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(error.as_str().unwrap().contains("refused the login"), "{error}");
+    // A refused login isn't retried right away (the router locks the admin out).
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let r = router.lock().unwrap();
+    assert_eq!((r.logins, r.logouts, r.changes.len()), (1, 1, 0));
+}

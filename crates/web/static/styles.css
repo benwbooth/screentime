@@ -119,6 +119,10 @@ label { font-weight: 600; font-size: 0.9rem; }
 .limit-row .day { width: 36px; font-weight: 600; }
 .switch { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; width: 104px; }
 .switch input { min-height: 0; width: 18px; height: 18px; accent-color: var(--accent); }
+.switch.wide { width: auto; margin-top: 6px; }
+.wifi .avatar svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.wifi .error { margin: 0 0 12px; }
+.picker.spaced { margin-top: 14px; }
 .minutes { width: 88px; }
 .downtime { border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .days { display: flex; gap: 6px; flex-wrap: wrap; }

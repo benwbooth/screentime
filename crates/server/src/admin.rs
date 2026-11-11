@@ -43,6 +43,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/test", post(push_test))
+        .route("/api/wifi", get(wifi))
+        .route("/api/wifi/time", post(wifi_time))
+        .route("/api/wifi/settings", put(wifi_settings))
 }
 
 #[derive(Deserialize)]
@@ -177,6 +180,7 @@ struct Overview {
     users: Vec<UserOverview>,
     pending_requests: Vec<RequestRow>,
     clients: Vec<ClientRow>,
+    wifi: crate::wifi::Overview,
 }
 
 async fn overview(State(s): State<AppState>, _: Admin) -> AppResult<Json<Overview>> {
@@ -190,6 +194,7 @@ async fn overview(State(s): State<AppState>, _: Admin) -> AppResult<Json<Overvie
         users,
         pending_requests: db::list_requests(&s.db, true, 50).await?,
         clients: db::list_clients(&s.db).await?,
+        wifi: crate::wifi::overview(&s).await?,
     }))
 }
 
@@ -481,4 +486,29 @@ async fn history(
         });
     }
     Ok(Json(out))
+}
+
+async fn wifi(State(s): State<AppState>, _: Admin) -> AppResult<Json<crate::wifi::Overview>> {
+    Ok(Json(crate::wifi::overview(&s).await?))
+}
+
+/// Add (positive) or take away (negative) Wi-Fi minutes. Never goes below zero.
+async fn wifi_time(State(s): State<AppState>, _: Admin, Json(body): Json<Adjustment>) -> AppResult<Json<crate::wifi::Overview>> {
+    if body.minutes == 0 || body.minutes.abs() > 24 * 60 {
+        return Err(AppError::BadRequest("between 1 minute and 24 hours".into()));
+    }
+    crate::wifi::adjust(&s, body.minutes).await?;
+    Ok(Json(crate::wifi::overview(&s).await?))
+}
+
+async fn wifi_settings(
+    State(s): State<AppState>,
+    _: Admin,
+    Json(body): Json<crate::wifi::SettingsChange>,
+) -> AppResult<Json<crate::wifi::Overview>> {
+    match crate::wifi::change_settings(&s, body).await {
+        Ok(()) => Ok(Json(crate::wifi::overview(&s).await?)),
+        Err(crate::wifi::SettingsError::Invalid(m)) => Err(AppError::BadRequest(m)),
+        Err(crate::wifi::SettingsError::Other(e)) => Err(e.into()),
+    }
 }
