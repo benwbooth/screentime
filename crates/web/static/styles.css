@@ -80,6 +80,11 @@ label { font-weight: 600; font-size: 0.9rem; }
   .nav { left: 0; right: 0; bottom: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(6, 1fr); padding: 4px 4px env(safe-area-inset-bottom); }
   .nav-item { flex-direction: column; gap: 2px; font-size: 0.68rem; padding: 6px 0; min-height: 56px; justify-content: center; }
   .nav-item .dot { top: 2px; left: calc(50% + 6px); }
+  .nav .sign-out { display: none; }
+}
+@media (min-width: 860px) {
+  .phone-only { display: none; }
+  .nav .sign-out { margin-top: auto; }
 }
 /* Desktop: sidebar. */
 @media (min-width: 860px) {

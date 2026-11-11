@@ -52,12 +52,12 @@ enum Tab {
     History,
     Schedules,
     Machines,
-    Notifications,
     Account,
+    Settings,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [Tab::Today, Tab::History, Tab::Schedules, Tab::Machines, Tab::Notifications, Tab::Account];
+    const ALL: [Tab; 6] = [Tab::Today, Tab::History, Tab::Schedules, Tab::Machines, Tab::Account, Tab::Settings];
 
     fn label(self) -> &'static str {
         match self {
@@ -65,8 +65,8 @@ impl Tab {
             Tab::History => "History",
             Tab::Schedules => "Schedules",
             Tab::Machines => "Computers",
-            Tab::Notifications => "Alerts",
             Tab::Account => "Account",
+            Tab::Settings => "Settings",
         }
     }
 
@@ -76,8 +76,8 @@ impl Tab {
             Tab::History => "M4 20V11M10 20V5M16 20v-6M2 20h20",
             Tab::Schedules => "M4 6h16M4 12h16M4 18h10M8 3v6M16 3v6",
             Tab::Machines => "M3 5h18v11H3zM8 20h8M12 16v4",
-            Tab::Notifications => "M6 16V11a6 6 0 1 1 12 0v5l2 2H4zM10 20a2 2 0 0 0 4 0",
             Tab::Account => "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0",
+            Tab::Settings => "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
         }
     }
 }
@@ -366,6 +366,10 @@ fn Shell() -> impl IntoView {
             <nav class="nav">
                 <div class="brand"><Logo/><span>"Screen time"</span></div>
                 {nav}
+                <button class="nav-item sign-out" on:click=move |_| sign_out(ctx)>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                    <span>"Sign out"</span>
+                </button>
             </nav>
             <main class="content">
                 {move || match ctx.tab.get() {
@@ -373,8 +377,8 @@ fn Shell() -> impl IntoView {
                     Tab::History => view! { <HistoryView/> }.into_any(),
                     Tab::Schedules => view! { <SchedulesView/> }.into_any(),
                     Tab::Machines => view! { <MachinesView/> }.into_any(),
-                    Tab::Notifications => view! { <NotificationsView/> }.into_any(),
                     Tab::Account => view! { <AccountView/> }.into_any(),
+                    Tab::Settings => view! { <SettingsView/> }.into_any(),
                 }}
             </main>
         </div>
@@ -587,7 +591,7 @@ fn KidCard(
             _ => None,
         });
         details.push(if !w.password_set {
-            Some("Not switching the router yet: set it up under Account".to_string())
+            Some("Not switching the router yet: set it up under Settings".to_string())
         } else if !w.enabled {
             Some("Paused: not switching the Wi-Fi".to_string())
         } else {
@@ -616,7 +620,7 @@ fn KidCard(
                         {if enabled { "Pause Wi-Fi time" } else { "Start Wi-Fi time" }}
                     </button>
                 })}
-                <button class="chip" class:suggested=!w.password_set on:click=move |_| ctx.tab.set(Tab::Account)>
+                <button class="chip" class:suggested=!w.password_set on:click=move |_| ctx.tab.set(Tab::Settings)>
                     {if w.password_set { "Router settings" } else { "Set up the router" }}
                 </button>
                 <button class="chip" on:click=move |_| ctx.tab.set(Tab::Schedules)>"Schedule"</button>
@@ -1383,7 +1387,7 @@ fn MachinesView() -> impl IntoView {
 }
 
 #[component]
-fn NotificationsView() -> impl IntoView {
+fn NotificationsCard() -> impl IntoView {
     let ctx = ctx();
     let support = push_support();
     let enabled = RwSignal::new(false);
@@ -1456,9 +1460,8 @@ fn NotificationsView() -> impl IntoView {
     };
 
     view! {
-        <header class="page-head"><h1>"Alerts"</h1></header>
         <div class="card">
-            <h3>"Notifications"</h3>
+            <h3>"Notifications on this device"</h3>
             {body}
             <p class="muted small">{move || devices.get().map(|n| match n {
                 0 => "No devices are signed up yet.".to_owned(),
@@ -1505,13 +1508,6 @@ fn AccountView() -> impl IntoView {
             busy.set(false);
         });
     };
-    let logout = move |_| {
-        spawn_local(async move {
-            let _ = api::logout().await;
-            ctx.overview.set(None);
-            ctx.set_auth(Auth::SignedOut);
-        });
-    };
     let field = |id: &'static str, label: &'static str, autocomplete: &'static str, value: RwSignal<String>| {
         view! {
             <label for=id>{label}</label>
@@ -1538,14 +1534,32 @@ fn AccountView() -> impl IntoView {
                 </button>
             </div>
         </form>
-        <WifiSettings/>
-        <RouterScripts/>
-        <div class="card">
+        <NotificationsCard/>
+        // On a phone the bottom bar has no room for it; on a computer it's in the sidebar.
+        <div class="card phone-only">
             <h3>"Sign out"</h3>
             <p class="muted small">"Signs out this device only."</p>
-            <button class="ghost" on:click=logout>"Sign out"</button>
+            <button class="ghost" on:click=move |_| sign_out(ctx)>"Sign out"</button>
         </div>
     }
+}
+
+/// House-wide settings: the Wi-Fi router and its scripts.
+#[component]
+fn SettingsView() -> impl IntoView {
+    view! {
+        <header class="page-head"><h1>"Settings"</h1></header>
+        <WifiSettings/>
+        <RouterScripts/>
+    }
+}
+
+fn sign_out(ctx: Ctx) {
+    spawn_local(async move {
+        let _ = api::logout().await;
+        ctx.overview.set(None);
+        ctx.set_auth(Auth::SignedOut);
+    });
 }
 
 /// The router that Wi-Fi time switches. The password is write-only: the page only learns

@@ -155,7 +155,7 @@ Tapping the notification opens the page with every amount (0/15/30/45/60/custom)
 server reachable, e.g. over your VPN. Keep the topic name secret: anyone who knows it can read the
 notifications and use their buttons.
 
-**Built-in Web Push (no app).** Open the web UI on your phone, go to Alerts and tap "Turn on
+**Built-in Web Push (no app).** Open the web UI on your phone, go to Account and tap "Turn on
 notifications". This needs a certificate the phone trusts (Let's Encrypt, or `ca.pem` installed
 on the phone). On iPhone, first add the page to the Home Screen and open it from there.
 
@@ -178,7 +178,7 @@ downtime or locked, the server switches the router's main 2.4 GHz and 5 GHz radi
 6 GHz radio is left alone), and back on when it's allowed again. Pausing Wi-Fi time stops the
 switching and, if the server had switched the Wi-Fi off, turns it back on.
 
-The router is switched by three JavaScript scripts, edited under Account → Router scripts:
+The router is switched by three JavaScript scripts, edited under Settings → Router scripts:
 **Check** (returns whether the Wi-Fi is on; run when the server starts, so a restart doesn't
 re-apply a setting that's already there), **Turn on** and **Turn off**. The built-in ones drive a
 Netgear Nighthawk RS200 through its web admin pages (log in, read the Advanced Wireless page's
@@ -195,7 +195,7 @@ card. The router allows one admin session at a time, so scripts run one at a tim
 the Wi-Fi needs to change. Failures are retried every minute (every 15 minutes after a
 `RouterError` with `badPassword`, to avoid the router's lockout).
 
-Set it up under Account → Wi-Fi router: the router's address (default `http://192.168.1.1`),
+Set it up under Settings → Wi-Fi router: the router's address (default `http://192.168.1.1`),
 username (`admin`) and password, then tick "Switch the Wi-Fi by its schedule and time". Nothing
 touches the router until then. The password is stored in the server's database (with the rest
 of its data, never in this repository) and is never sent back to the browser; the page only
