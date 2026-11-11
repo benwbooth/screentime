@@ -8,7 +8,8 @@ const USAGE: &str = "usage:
   screentime-server gen-cert DIR NAME...  make a private CA and a server certificate for NAME (host names / IPs)
   screentime-server fingerprint CERT.pem  print a certificate's fingerprint for clients' serverFingerprint
   screentime-server add-client HOST  register a machine and print its token (replaces any old one)
-  screentime-server list-clients";
+  screentime-server list-clients
+  screentime-server add-user NAME [--unlimited]  add a kid (default daily limit, or no limit at all)";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,6 +43,16 @@ async fn main() -> Result<()> {
             let config = Config::from_env()?;
             let pool = open_db(&config.db_url).await?;
             println!("{}", db::add_client(&pool, host).await?);
+            Ok(())
+        }
+        ["add-user", name, rest @ ..] if rest.iter().all(|a| *a == "--unlimited") => {
+            let config = Config::from_env()?;
+            let pool = open_db(&config.db_url).await?;
+            let id = db::ensure_user(&pool, name, config.default_allowance_minutes).await?;
+            if !rest.is_empty() {
+                db::set_allowances(&pool, id, &[None; 7]).await?;
+            }
+            println!("{name}: {}", if rest.is_empty() { "added" } else { "added, no daily limit" });
             Ok(())
         }
         ["gen-cert", dir, names @ ..] => {
