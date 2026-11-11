@@ -130,8 +130,15 @@ const DEFAULT_ADMIN_GROUP: &str = "wheel";
 const DEFAULT_ADMIN_GROUP: &str = "Administrators";
 
 fn hostname() -> String {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname").ok();
+    // macOS: the Bonjour name ("m1" for m1.local), which is what people call the Mac.
+    #[cfg(target_os = "macos")]
+    let name = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "LocalHostName"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok());
     #[cfg(windows)]
     let name = std::env::var("COMPUTERNAME").ok();
     name.map(|h| h.trim().to_owned()).filter(|h| !h.is_empty()).unwrap_or_else(|| "unknown".into())
