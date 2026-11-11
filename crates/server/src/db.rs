@@ -567,6 +567,22 @@ pub async fn report_accounts(
                     .bind(id)
                     .execute(db)
                     .await?;
+                // Until a parent decides, an account no kid is assigned to follows what the
+                // computer was set up with (e.g. it was seen before the install named it).
+                if let (Some(kid), false) = (&a.configured_kid, a.admin) {
+                    let undecided: bool = sqlx::query_scalar("SELECT decided = 0 AND user_id IS NULL FROM accounts WHERE id = ?")
+                        .bind(id)
+                        .fetch_one(db)
+                        .await?;
+                    if undecided {
+                        let kid = ensure_user(db, kid, default_minutes).await?;
+                        sqlx::query("UPDATE accounts SET user_id = ?, decided = 1 WHERE id = ?")
+                            .bind(kid)
+                            .bind(id)
+                            .execute(db)
+                            .await?;
+                    }
+                }
             }
             None => {
                 // The first time an account shows up, keep what the computer was set up with.

@@ -122,7 +122,12 @@ mod mac {
             .collect()
     }
 
-    struct Mac;
+    struct Mac {
+        /// Accounts the install named to limit. On a Mac the limited account may be an
+        /// administrator (a parent's own account a kid uses); it's reported as a standard
+        /// account so the server will limit it, and it can't approve time for itself.
+        configured: Vec<String>,
+    }
 
     impl Platform for Mac {
         async fn sessions(&self) -> Result<Vec<Session>> {
@@ -168,7 +173,7 @@ mod mac {
                     let mut parts = l.split_whitespace();
                     let (name, uid) = (parts.next()?, parts.next()?.parse::<i64>().ok()?);
                     (uid >= 500 && !name.starts_with('_')).then(|| LocalAccount {
-                        admin: admins.iter().any(|a| a == name),
+                        admin: admins.iter().any(|a| a == name) && !self.configured.iter().any(|c| c == name),
                         name: name.to_owned(),
                         configured_kid: None,
                     })
@@ -177,7 +182,7 @@ mod mac {
         }
 
         fn admins(&self) -> Vec<String> {
-            group_members("admin").into_iter().filter(|u| u != "root").collect()
+            group_members("admin").into_iter().filter(|u| u != "root" && !self.configured.contains(u)).collect()
         }
     }
 
@@ -220,7 +225,8 @@ mod mac {
         }
         let config = Config::from_env()?;
         let listener = bind_socket(&config.socket)?;
-        let agent = Agent::new(config, Mac)?;
+        let platform = Mac { configured: config.users.clone() };
+        let agent = Agent::new(config, platform)?;
 
         let server = agent.clone();
         tokio::spawn(async move {

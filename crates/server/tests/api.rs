@@ -509,6 +509,26 @@ async fn computers_report_accounts_and_parents_assign_them() {
 }
 
 #[tokio::test]
+async fn an_undecided_account_follows_a_later_install_setting() {
+    let s = server(with_password()).await;
+    let mac = db::add_client(&s.state.db, "m1").await.unwrap();
+    // First seen as an administrator with nothing configured, then installed to limit it.
+    let first = json!({"accounts": [{"name": "bbooth", "admin": true}]});
+    s.call("POST", "/api/client/accounts", Some(&mac), Some(first)).await;
+    let later = json!({"accounts": [{"name": "bbooth", "admin": false, "configured_kid": "adrian"}]});
+    let (_, _, body) = s.call("POST", "/api/client/accounts", Some(&mac), Some(later.clone())).await;
+    let reply: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(reply["limited"], json!([{"account": "bbooth", "kid": "adrian"}]));
+
+    // Once a parent has decided, the computer's setting no longer changes it.
+    let cookie = s.admin_cookie().await;
+    s.call("PUT", "/api/clients/m1/accounts/bbooth", Some(cookie.as_str()), Some(json!({"kid": null}))).await;
+    let (_, _, body) = s.call("POST", "/api/client/accounts", Some(&mac), Some(later)).await;
+    let reply: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(reply["limited"], json!([]));
+}
+
+#[tokio::test]
 async fn parents_can_lock_and_take_time_away() {
     let s = server(with_password()).await;
     let pc1 = db::add_client(&s.state.db, "Ryan-PC").await.unwrap();
