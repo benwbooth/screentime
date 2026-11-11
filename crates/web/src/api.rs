@@ -90,6 +90,31 @@ pub struct Wifi {
     pub router_user: String,
     pub wanted_on: Option<bool>,
     pub router: RouterStatus,
+    /// "on", "off" and/or "status": scripts changed from the built-in ones.
+    #[serde(default)]
+    pub custom_scripts: Vec<String>,
+}
+
+/// The router scripts as saved, with the built-in ones for "Reset to default".
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Scripts {
+    pub on: String,
+    pub off: String,
+    pub status: String,
+    pub default_on: String,
+    pub default_off: String,
+    pub default_status: String,
+}
+
+/// What a script run did.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ScriptOutcome {
+    pub ok: bool,
+    #[serde(default)]
+    pub value: serde_json::Value,
+    pub message: Option<String>,
+    #[serde(default)]
+    pub logs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -289,4 +314,19 @@ pub async fn set_wifi(
         "router_password": router_password,
     });
     send("PUT", "/api/wifi/settings", &body).await.map(drop)
+}
+
+pub async fn wifi_scripts() -> ApiResult<Scripts> {
+    get("/api/wifi/scripts").await
+}
+
+/// Save one router script ("on", "off" or "status"); an empty one goes back to the built-in.
+pub async fn save_script(which: &str, code: &str) -> ApiResult<()> {
+    let body = serde_json::json!({ format!("script_{which}"): code });
+    send("PUT", "/api/wifi/settings", &body).await.map(drop)
+}
+
+/// Run a router script now, as edited.
+pub async fn test_script(which: &str, code: &str) -> ApiResult<ScriptOutcome> {
+    json(send("POST", "/api/wifi/test", &serde_json::json!({ "script": which, "code": code })).await?).await
 }

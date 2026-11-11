@@ -19,7 +19,7 @@ rpassword = "7"
 web-push-native = "0.5"
 base64ct = { version = "1", features = ["alloc"] }
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -31,6 +31,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "compression-gzip", "compression-br", "set-header"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rquickjs = "0.14.0"
 
 [dev-dependencies]
 http-body-util = "0.1"

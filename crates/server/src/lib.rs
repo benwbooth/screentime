@@ -11,6 +11,7 @@ pub mod error;
 pub mod notify;
 pub mod push;
 pub mod request_page;
+pub mod script;
 pub mod wifi;
 
 use axum::Router;

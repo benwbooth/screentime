@@ -214,3 +214,13 @@ label { font-weight: 600; font-size: 0.9rem; }
 .session-time { font-weight: 600; }
 .session-len { grid-row: span 2; align-self: center; font-weight: 650; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+.scripts code { font-size: 0.85em; background: var(--surface-2); border-radius: 5px; padding: 1px 4px; }
+.scripts .segmented { align-self: flex-start; }
+textarea.code { font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; width: 100%; min-height: 360px;
+  resize: vertical; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text);
+  padding: 10px 12px; tab-size: 2; white-space: pre; overflow: auto; }
+textarea.code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.script-result { border-left: 3px solid var(--ok); padding: 6px 10px; background: var(--surface-2); border-radius: 6px; }
+.script-result.bad { border-color: var(--off); }
+.script-result pre { margin: 6px 0 0; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }

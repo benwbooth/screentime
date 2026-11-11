@@ -6,7 +6,7 @@
 //! Nothing touches the router until a parent has saved the router password and turned Wi-Fi
 //! time on, so a fresh install (or an upgrade) never cuts the Wi-Fi by itself.
 
-use crate::{AppState, db};
+use crate::{AppState, db, script};
 use anyhow::{Context, Result};
 use chrono::{Local, Utc};
 use screentime_common::{Decision, UsageReport, evaluate};
@@ -41,6 +41,8 @@ pub struct RouterStatus {
 #[derive(Default)]
 pub struct Wifi {
     settings: Mutex<()>,
+    /// Held while a router script runs.
+    router_busy: Mutex<()>,
     router: Mutex<RouterStatus>,
     wake: Notify,
     /// Settings changed: try the router again now instead of waiting out a back-off.
@@ -64,16 +66,58 @@ pub struct Row {
     pub router_url: String,
     pub router_user: String,
     pub router_password: Option<String>,
+    pub script_on: Option<String>,
+    pub script_off: Option<String>,
+    pub script_status: Option<String>,
 }
 
 impl Row {
     pub fn password_set(&self) -> bool {
         self.router_password.as_deref().is_some_and(|p| !p.is_empty())
     }
+
+    /// The script that does `which`, the built-in one unless it was changed.
+    pub fn script(&self, which: Script) -> &str {
+        let (saved, default) = match which {
+            Script::On => (&self.script_on, script::DEFAULT_ON),
+            Script::Off => (&self.script_off, script::DEFAULT_OFF),
+            Script::Status => (&self.script_status, script::DEFAULT_STATUS),
+        };
+        saved.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(default)
+    }
+
+    pub fn router_config(&self) -> script::RouterConfig {
+        script::RouterConfig {
+            url: self.router_url.clone(),
+            user: self.router_user.clone(),
+            password: self.router_password.clone().unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Script {
+    On,
+    Off,
+    Status,
+}
+
+/// Run one of the router scripts, one at a time (the router allows a single admin session).
+pub async fn run_script(state: &AppState, row: &Row, which: Script, code: Option<String>) -> script::Outcome {
+    let _one_at_a_time = state.wifi.router_busy.lock().await;
+    let code = code.unwrap_or_else(|| row.script(which).to_owned());
+    let outcome = script::run(code, row.router_config()).await;
+    if !outcome.ok {
+        tracing::warn!(script = ?which, "router script failed: {}", outcome.message.as_deref().unwrap_or(""));
+    }
+    outcome
 }
 
 pub async fn load(db: &SqlitePool) -> Result<Row> {
-    Ok(sqlx::query_as("SELECT enabled, router_url, router_user, router_password FROM wifi WHERE id = 1")
+    Ok(sqlx::query_as(
+        "SELECT enabled, router_url, router_user, router_password, script_on, script_off, script_status FROM wifi WHERE id = 1",
+    )
         .fetch_one(db)
         .await?)
 }
@@ -111,6 +155,10 @@ pub struct SettingsChange {
     pub router_user: Option<String>,
     /// A new password; an empty string clears it. Left out keeps the saved one.
     pub router_password: Option<String>,
+    /// New scripts; an empty string goes back to the built-in one.
+    pub script_on: Option<String>,
+    pub script_off: Option<String>,
+    pub script_status: Option<String>,
 }
 
 /// `http://192.168.1.1` from `192.168.1.1`, `http://192.168.1.1/`, etc. Only a scheme and host.
@@ -158,17 +206,36 @@ pub async fn change_settings(state: &AppState, change: SettingsChange) -> Result
         }
         row.router_password = (!password.is_empty()).then_some(password);
     }
+    for (new, saved, default) in [
+        (change.script_on, &mut row.script_on, script::DEFAULT_ON),
+        (change.script_off, &mut row.script_off, script::DEFAULT_OFF),
+        (change.script_status, &mut row.script_status, script::DEFAULT_STATUS),
+    ] {
+        if let Some(code) = new {
+            if code.len() > script::MAX_SCRIPT_BYTES {
+                return Err(SettingsError::Invalid("That script is too long.".into()));
+            }
+            // Saving the built-in script unchanged keeps following future updates to it.
+            *saved = (!code.trim().is_empty() && code.trim() != default.trim()).then_some(code);
+        }
+    }
     if let Some(enabled) = change.enabled {
         row.enabled = enabled;
     }
     if row.enabled && !row.password_set() {
         return Err(SettingsError::Invalid("Save the router password first.".into()));
     }
-    sqlx::query("UPDATE wifi SET enabled = ?, router_url = ?, router_user = ?, router_password = ? WHERE id = 1")
-        .bind(row.enabled)
-        .bind(&row.router_url)
-        .bind(&row.router_user)
-        .bind(&row.router_password)
+    sqlx::query(
+        "UPDATE wifi SET enabled = ?, router_url = ?, router_user = ?, router_password = ?,
+         script_on = ?, script_off = ?, script_status = ? WHERE id = 1",
+    )
+    .bind(row.enabled)
+    .bind(&row.router_url)
+    .bind(&row.router_user)
+    .bind(&row.router_password)
+    .bind(&row.script_on)
+    .bind(&row.script_off)
+    .bind(&row.script_status)
         .execute(&state.db)
         .await?;
     drop(_guard);
@@ -176,6 +243,60 @@ pub async fn change_settings(state: &AppState, change: SettingsChange) -> Result
     state.wifi.retry_now.store(true, Ordering::SeqCst);
     state.wifi.poke();
     Ok(())
+}
+
+/// Run a script from the settings page, saved or as edited. A successful on/off test or a status
+/// check also tells the server what the router is doing now.
+pub async fn test_script(state: &AppState, which: Script, code: Option<String>) -> Result<script::Outcome> {
+    let row = load(&state.db).await?;
+    if let Some(code) = &code
+        && code.len() > script::MAX_SCRIPT_BYTES
+    {
+        return Ok(script::Outcome { message: Some("That script is too long.".into()), ..Default::default() });
+    }
+    let outcome = run_script(state, &row, which, code).await;
+    let known = match (which, outcome.ok, &outcome.value) {
+        (Script::On, true, _) => Some(true),
+        (Script::Off, true, _) => Some(false),
+        (Script::Status, true, serde_json::Value::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    if let Some(on) = known {
+        let mut status = state.wifi.router.lock().await;
+        if status.on != Some(on) {
+            status.last_changed_at = Some(Utc::now().to_rfc3339());
+        }
+        status.on = Some(on);
+        status.last_error = None;
+        status.last_error_at = None;
+        drop(status);
+        // The schedule may want it the other way; let the controller look again.
+        state.wifi.poke();
+    }
+    Ok(outcome)
+}
+
+/// The scripts as saved, and the built-in ones for "Reset to default".
+#[derive(Debug, Serialize)]
+pub struct Scripts {
+    pub on: String,
+    pub off: String,
+    pub status: String,
+    pub default_on: &'static str,
+    pub default_off: &'static str,
+    pub default_status: &'static str,
+}
+
+pub async fn scripts(db: &SqlitePool) -> Result<Scripts> {
+    let row = load(db).await?;
+    Ok(Scripts {
+        on: row.script(Script::On).to_owned(),
+        off: row.script(Script::Off).to_owned(),
+        status: row.script(Script::Status).to_owned(),
+        default_on: script::DEFAULT_ON,
+        default_off: script::DEFAULT_OFF,
+        default_status: script::DEFAULT_STATUS,
+    })
 }
 
 /// The router side of Wi-Fi time, for the UI. Never includes the router password.
@@ -191,6 +312,8 @@ pub struct Overview {
     /// What the router should be set to; `None` when the server leaves it alone.
     pub wanted_on: Option<bool>,
     pub router: RouterStatus,
+    /// Which scripts were changed from the built-in ones.
+    pub custom_scripts: Vec<Script>,
 }
 
 pub async fn overview(state: &AppState) -> Result<Overview> {
@@ -202,6 +325,15 @@ pub async fn overview(state: &AppState) -> Result<Overview> {
         enabled: row.enabled,
         password_set: row.password_set(),
         wanted_on: wanted(&row, allowed, router.on),
+        custom_scripts: [
+            (Script::On, &row.script_on),
+            (Script::Off, &row.script_off),
+            (Script::Status, &row.script_status),
+        ]
+        .into_iter()
+        .filter(|(_, s)| s.is_some())
+        .map(|(w, _)| w)
+        .collect(),
         router_url: row.router_url,
         router_user: row.router_user,
         router,
@@ -221,6 +353,24 @@ fn wanted(row: &Row, allowed: bool, router_on: Option<bool>) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// Get the router to `on`. When the server doesn't know what the router is doing yet (it just
+/// started), ask the status script first, so a restart doesn't re-apply a setting that's already
+/// there (applying restarts the radios).
+async fn switch(state: &AppState, row: &Row, on: bool, known: Option<bool>) -> Result<(), script::Outcome> {
+    if known.is_none() {
+        let status = run_script(state, row, Script::Status, None).await;
+        if status.ok && status.value == serde_json::Value::Bool(on) {
+            return Ok(());
+        }
+        // A refused password won't work any better for the switch; anything else, just try it.
+        if !status.ok && status.bad_password {
+            return Err(status);
+        }
+    }
+    let outcome = run_script(state, row, if on { Script::On } else { Script::Off }, None).await;
+    if outcome.ok { Ok(()) } else { Err(outcome) }
 }
 
 /// Keep the router in line with the schedule, and count the minutes the Wi-Fi is on. Runs for
@@ -267,27 +417,25 @@ pub async fn run(state: AppState) {
                     && current != Some(on)
                     && retry_at.is_none_or(|t| Instant::now() >= t)
                 {
-                    let router = netgear::Router {
-                        url: &row.router_url,
-                        user: &row.router_user,
-                        password: row.router_password.as_deref().unwrap_or_default(),
-                    };
                     tracing::info!(on, "switching the Wi-Fi");
-                    let result = netgear::set_wifi(&router, on).await;
+                    let result = switch(&state, &row, on, current).await;
                     let now = Utc::now().to_rfc3339();
                     let mut status = state.wifi.router.lock().await;
                     match result {
                         Ok(()) => {
                             tracing::info!(on, "Wi-Fi switched");
+                            if status.on != Some(on) {
+                                status.last_changed_at = Some(now);
+                            }
                             status.on = Some(on);
-                            status.last_changed_at = Some(now);
                             status.last_error = None;
                             status.last_error_at = None;
                             retry_at = None;
                         }
                         Err(e) => {
-                            tracing::warn!(on, "switching the Wi-Fi failed: {}", e.message);
-                            status.last_error = Some(e.message);
+                            let message = e.message.unwrap_or_else(|| "the router script failed".into());
+                            tracing::warn!(on, "switching the Wi-Fi failed: {message}");
+                            status.last_error = Some(message);
                             status.last_error_at = Some(now);
                             let wait = if e.bad_password { RETRY_AFTER_BAD_PASSWORD } else { RETRY_AFTER };
                             retry_at = Some(Instant::now() + wait);
@@ -308,373 +456,9 @@ pub async fn run(state: AppState) {
     }
 }
 
-/// The Netgear Nighthawk RS200v2 web admin, driven the same way as the router's own pages:
-/// log in, read a one-time token off the Advanced Wireless page, post that page's form with the
-/// main 2.4 GHz and 5 GHz radios switched, log out. The 6 GHz radio is left alone.
-pub mod netgear {
-    use super::*;
-
-    pub struct Router<'a> {
-        pub url: &'a str,
-        pub user: &'a str,
-        pub password: &'a str,
-    }
-
-    #[derive(Debug)]
-    pub struct Failure {
-        pub message: String,
-        /// The router refused the login; trying again soon would lock the admin out.
-        pub bad_password: bool,
-    }
-
-    impl Failure {
-        fn new(message: impl Into<String>) -> Failure {
-            Failure { message: message.into(), bad_password: false }
-        }
-    }
-
-    /// Extra attempts after the first one, and the pause between them.
-    const RETRIES: u32 = 2;
-    const RETRY_WAIT: Duration = Duration::from_secs(5);
-
-    pub async fn set_wifi(router: &Router<'_>, on: bool) -> Result<(), Failure> {
-        let mut last = Failure::new("not tried");
-        for i in 0..=RETRIES {
-            if i > 0 {
-                tokio::time::sleep(RETRY_WAIT).await;
-            }
-            match attempt(router, on).await {
-                Ok(()) => return Ok(()),
-                Err(e) if e.bad_password => return Err(e),
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
-    }
-
-    /// The router's own login page sends the password like this.
-    pub fn encode_twice(password: &str) -> String {
-        use base64ct::{Base64, Encoding};
-        const CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ=";
-        let r = || CHARS[rand::random_range(0..CHARS.len())] as char;
-        let inner = Base64::encode_string(password.as_bytes());
-        Base64::encode_string(format!("{}{inner}{}", r(), r()).as_bytes())
-    }
-
-    /// The one-time token in the page's form action: `/apply.cgi?/WLG_adv.htm timestamp=123`.
-    pub fn form_token(html: &str) -> Option<&str> {
-        const MARK: &str = "/apply.cgi?/WLG_adv.htm";
-        let mut rest = html;
-        while let Some(i) = rest.find(MARK) {
-            rest = &rest[i + MARK.len()..];
-            if let Some(after) = rest.strip_prefix(' ').or_else(|| rest.strip_prefix("%20"))
-                && let Some(after) = after.strip_prefix("timestamp=")
-            {
-                let n = after.bytes().take_while(u8::is_ascii_digit).count();
-                if n > 0 {
-                    return Some(&after[..n]);
-                }
-            }
-        }
-        None
-    }
-
-    /// Why the settings page came back without its token.
-    /// Why the settings page came back without its token. `login_reply` is the body of the login
-    /// post: the router's own login page treats "3" as another admin signed in and "5" as refused.
-    pub fn explain_missing_token(html: &str, login_reply: &str, login_status: u16, page_status: u16) -> Failure {
-        let l = html.to_ascii_lowercase();
-        let login_page =
-            l.contains("admin_login") || ["type=password", "type=\"password", "type='password"].iter().any(|p| l.contains(p));
-        let another_admin = login_reply.trim() == "3"
-            || l.contains("already logged in")
-            || l.contains("another user")
-            || l.contains("another admin")
-            // The login page itself links to multi_login.html, so only count it elsewhere.
-            || (!login_page && l.contains("multi_login"));
-        if another_admin {
-            return Failure::new("another admin session is open on the router (its web page or the Nighthawk app)");
-        }
-        if login_reply.trim() == "5" || login_page {
-            return Failure {
-                message: "the router refused the login (wrong password, or locked out after too many tries)".into(),
-                bad_password: true,
-            };
-        }
-        Failure::new(format!(
-            "the router didn't return its settings page (login HTTP {login_status}, page HTTP {page_status})"
-        ))
-    }
-
-    /// The radios' current settings on the Advanced Wireless page: (2.4 GHz, 5 GHz) on or off.
-    pub fn radios(html: &str) -> Option<(bool, bool)> {
-        let var = |name: &str| {
-            let at = html.find(&format!("var {name}="))? + name.len() + 5;
-            let quote = html[at..].chars().next()?;
-            let value = html[at + 1..].split(quote).next()?;
-            Some(value == "1")
-        };
-        Some((var("con_endis_wl_radio")?, var("con_endis_wla_radio")?))
-    }
-
-    /// The Advanced Wireless form as captured from the router. Only the two radio switches change
-    /// (plus `enable_ap`/`enable_ap_an` when turning on); everything else goes back unchanged.
-    pub const FORM: &[(&str, &str)] = &[
-        ("submit_flag", "wlan_adv"),
-        ("wl_rts", "2347"),
-        ("wl_frag", "2346"),
-        ("wl_enable_shortpreamble", "0"),
-        ("wl_tx_ctrl", "100"),
-        ("wl_enable_router", "0"),
-        ("endis_pin", "0"),
-        ("hid_protect_enable", "1"),
-        ("hid_super_wifi", "0"),
-        ("hid_super_wifi_an", "0"),
-        ("wla_rts", "2347"),
-        ("wla_frag", ""),
-        ("wla_enable_shortpreamble", "0"),
-        ("wla_tx_ctrl", "100"),
-        ("wla_enable_router", "0"),
-        ("hid_super_wifi_tri", "0"),
-        ("wla_2nd_rts", ""),
-        ("wla_2nd_frag", ""),
-        ("wla_2nd_enable_shortpreamble", ""),
-        ("wla_2nd_tx_ctrl", ""),
-        ("wla_2nd_enable_router", "0"),
-        ("wla_6g_rts", "2347"),
-        ("wla_6g_frag", ""),
-        ("wla_6g_enable_shortpreamble", "0"),
-        ("wla_6g_enable_router", "1"),
-        ("wig_enable_router", "ignore"),
-        ("wds_change_ip", "still_lanip"),
-        ("enable_router", "ignore"),
-        ("enable_ssid_broadcast", "ignore"),
-        ("endis_wsc_config", "5"),
-        ("endis_wsc_config_a", "5"),
-        ("endis_wsc_config_tri", "1"),
-        ("wladv_endis_wmm", "1"),
-        ("wladv_endis_wmm_a", "1"),
-        ("wladv_endis_wmm_tri", ""),
-        ("wladv_endis_wmm_6g", "0"),
-        ("hid_dyn_get_ip", ""),
-        ("hid_ap_ipaddr", ""),
-        ("hid_ap_subnet", ""),
-        ("hid_ap_gateway", ""),
-        ("ap_dnsaddr1", ""),
-        ("ap_dnsaddr2", ""),
-        ("wladv_enable_schedule", "0"),
-        ("wladv_enable_schedule_a", "0"),
-        ("wladv_enable_schedule_tri", "0"),
-        ("wladv_enable_schedule_6g", "0"),
-        ("wladv_schedule_type", ""),
-        ("wladv_schedule_edit_num", ""),
-        ("wladv_schedule_delete_num", ""),
-        ("hid_enable_coexist", "0"),
-        ("hid_wlg_mu_mimo", "1"),
-        ("hid_wla_beamforming", "1"),
-        ("hid_wla_mu_mimo", "1"),
-        ("hid_wla_bf", "1"),
-        ("hid_enable_atf", "1"),
-        ("hid_wla_ht160", "1"),
-        ("hid_11k", "0"),
-        ("hid_disable_pmf", "0"),
-        ("hid_wla_2nd_beamforming", ""),
-        ("hid_wla_2nd_mu_mimo", "1"),
-        ("hid_wla_2nd_bf", ""),
-        ("hid_wla_2nd_ht160", "1"),
-        ("hid_wla_6g_mu_mimo", "1"),
-        ("hid_wla_6g_beamforming", ""),
-        ("hid_wla_6g_bf", "1"),
-        ("hid_wla_6g_ofdma", "1"),
-        ("hid_mlo_mode", "0"),
-        ("hid_mlo_change_reboot", ""),
-        ("enable_coexistence", "on"),
-        ("wmm_enable", "1"),
-        ("frag", "2346"),
-        ("rts", "2347"),
-        ("enable_shortpreamble", "automatic"),
-        ("tx_power_ctrl", "100"),
-        ("wmm_enable_a", "1"),
-        ("frag_an", "2346"),
-        ("rts_an", "2347"),
-        ("enable_shortpreamble_an", "automatic"),
-        ("tx_power_ctrl_an", "100"),
-        ("enable_ap_6g", "1"),
-        ("frag_6g", "2346"),
-        ("rts_6g", "2347"),
-        ("enable_short_preamble_6g", "automatic"),
-        ("tx_power_ctrl_6g", "100"),
-        ("pin_disable", "1"),
-        ("prevent_pin_compromise", "on"),
-        ("pin_attack_count", "3"),
-        ("wsc_config", "on"),
-        ("wla_wsc_config", "on"),
-        ("enable_mu", ""),
-        ("enable_atf", "on"),
-        ("enable_ht160", ""),
-    ];
-
-    pub fn form(on: bool) -> Vec<(&'static str, &'static str)> {
-        let enable = if on { "1" } else { "0" };
-        let mut body: Vec<_> = FORM
-            .iter()
-            .map(|&(k, v)| match k {
-                "wl_enable_router" | "wla_enable_router" => (k, enable),
-                _ => (k, v),
-            })
-            .collect();
-        if on {
-            body.push(("enable_ap", "1"));
-            body.push(("enable_ap_an", "1"));
-        }
-        body
-    }
-
-    fn unreachable(router: &Router<'_>, e: reqwest::Error) -> Failure {
-        if e.is_timeout() {
-            return Failure::new(format!("the router at {} didn't answer in time", router.url));
-        }
-        // reqwest's own message is just "error sending request"; the cause is further down.
-        let mut cause = String::new();
-        let mut source = std::error::Error::source(&e);
-        while let Some(s) = source {
-            cause = s.to_string();
-            source = s.source();
-        }
-        if cause.is_empty() {
-            cause = e.without_url().to_string();
-        }
-        Failure::new(format!("couldn't reach the router at {} ({cause})", router.url))
-    }
-
-    /// One login → token → change → logout cycle.
-    async fn attempt(router: &Router<'_>, on: bool) -> Result<(), Failure> {
-        let base = router.url.trim_end_matches('/');
-        let http = reqwest::Client::builder()
-            .cookie_store(true)
-            // Without a browser's User-Agent the router keeps serving its login page.
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
-            .build()
-            .map_err(|e| Failure::new(format!("HTTP client: {e}")))?;
-
-        let login = http
-            .post(format!("{base}/apply.cgi?%20timestamp=undefined"))
-            .timeout(Duration::from_secs(10))
-            .form(&[
-                ("submit_flag", "admin_login"),
-                ("username", router.user),
-                ("password", &encode_twice(router.password)),
-            ])
-            .send()
-            .await
-            .map_err(|e| unreachable(router, e))?;
-        let login_status = login.status().as_u16();
-        let login_reply = login.text().await.unwrap_or_default();
-
-        let result = change(&http, router, base, on, &login_reply, login_status).await;
-        // The router allows one admin session at a time, so always end ours.
-        let _ = http.get(format!("{base}/LGO_logout.htm")).timeout(Duration::from_secs(5)).send().await;
-        result
-    }
-
-    async fn change(
-        http: &reqwest::Client,
-        router: &Router<'_>,
-        base: &str,
-        on: bool,
-        login_reply: &str,
-        login_status: u16,
-    ) -> Result<(), Failure> {
-        let page = http
-            .get(format!("{base}/WLG_adv.htm"))
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| unreachable(router, e))?;
-        let page_status = page.status().as_u16();
-        let html = page.text().await.map_err(|e| unreachable(router, e))?;
-        // Without the token the router answers 400, so don't send the change.
-        let Some(token) = form_token(&html) else {
-            return Err(explain_missing_token(&html, login_reply, login_status, page_status));
-        };
-        // Already that way: applying wireless settings restarts the radios, so don't.
-        if radios(&html) == Some((on, on)) {
-            tracing::info!(on, "the Wi-Fi is already switched that way");
-            return Ok(());
-        }
-        let applied = http
-            .post(format!("{base}/apply.cgi?/WLG_adv.htm%20timestamp={token}"))
-            .timeout(Duration::from_secs(20))
-            .header(reqwest::header::REFERER, format!("{base}/WLG_adv.htm"))
-            .form(&form(on))
-            .send()
-            .await
-            .map_err(|e| unreachable(router, e))?;
-        let code = applied.status().as_u16();
-        let _ = applied.bytes().await;
-        if (200..400).contains(&code) {
-            Ok(())
-        } else {
-            Err(Failure::new(format!("the router rejected the change (HTTP {code})")))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::netgear::*;
     use super::*;
-
-    #[test]
-    fn finds_the_form_token() {
-        let html = r#"<form action="/apply.cgi?/WLG_adv.htm timestamp=123456" method="post">"#;
-        assert_eq!(form_token(html), Some("123456"));
-        assert_eq!(form_token("x /apply.cgi?/WLG_adv.htm%20timestamp=42\""), Some("42"));
-        assert_eq!(form_token("/apply.cgi?/WLG_adv.htm timestamp=\" /apply.cgi?/WLG_adv.htm timestamp=7"), Some("7"));
-        assert_eq!(form_token("<input type=password name=password>"), None);
-    }
-
-    #[test]
-    fn password_encoding_round_trips() {
-        use base64ct::{Base64, Encoding};
-        let outer = Base64::decode_vec(&encode_twice("hunter2")).unwrap();
-        let outer = String::from_utf8(outer).unwrap();
-        let inner = &outer[1..outer.len() - 1];
-        assert_eq!(Base64::decode_vec(inner).unwrap(), b"hunter2");
-    }
-
-    #[test]
-    fn explains_why_there_was_no_token() {
-        // The router's login page links to multi_login.html from its own script.
-        let login_page = r#"submit_flag": "admin_login" top.location.href="multi_login.html"; <input type="password">"#;
-        assert!(explain_missing_token(login_page, "", 200, 200).bad_password);
-        assert!(explain_missing_token(login_page, "5", 200, 200).bad_password);
-        let multi = explain_missing_token(login_page, "3", 200, 200);
-        assert!(!multi.bad_password && multi.message.contains("another admin"));
-        assert!(explain_missing_token("<p>multi_login</p>", "", 200, 200).message.contains("another admin"));
-        assert!(explain_missing_token("", "", 500, 404).message.contains("HTTP 500"));
-    }
-
-    #[test]
-    fn reads_the_radios() {
-        let page = "var con_endis_wl_radio='0';\nvar x=1;\nvar con_endis_wla_radio='1';";
-        assert_eq!(radios(page), Some((false, true)));
-        assert_eq!(radios("var con_endis_wl_radio=\"1\"; var con_endis_wla_radio=\"1\";"), Some((true, true)));
-        assert_eq!(radios("nothing"), None);
-    }
-
-    #[test]
-    fn form_switches_only_the_main_radios() {
-        let off = form(false);
-        let on = form(true);
-        let get = |f: &[(&str, &str)], k: &str| f.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
-        assert_eq!(get(&off, "wl_enable_router").as_deref(), Some("0"));
-        assert_eq!(get(&on, "wla_enable_router").as_deref(), Some("1"));
-        assert_eq!(get(&on, "wla_6g_enable_router").as_deref(), Some("1"));
-        assert_eq!(get(&off, "wla_6g_enable_router").as_deref(), Some("1"));
-        assert_eq!(get(&on, "enable_ap").as_deref(), Some("1"));
-        assert_eq!(get(&off, "enable_ap"), None);
-    }
 
     #[test]
     fn router_addresses() {
@@ -694,7 +478,11 @@ mod tests {
             router_url: "http://192.168.1.1".into(),
             router_user: "admin".into(),
             router_password: Some("x".into()),
+            script_on: None,
+            script_off: None,
+            script_status: None,
         };
+        assert_eq!(row.script(Script::On), script::DEFAULT_ON);
         assert_eq!(wanted(&row, false, Some(true)), Some(false));
         assert_eq!(wanted(&row, true, None), Some(true));
         row.enabled = false;

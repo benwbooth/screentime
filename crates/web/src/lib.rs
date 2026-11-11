@@ -1539,6 +1539,7 @@ fn AccountView() -> impl IntoView {
             </div>
         </form>
         <WifiSettings/>
+        <RouterScripts/>
         <div class="card">
             <h3>"Sign out"</h3>
             <p class="muted small">"Signs out this device only."</p>
@@ -1634,6 +1635,142 @@ fn WifiSettings() -> impl IntoView {
                 </Show>
             </div>
         </form>
+    }
+}
+
+/// The JavaScript that switches the router, editable and testable here.
+#[component]
+fn RouterScripts() -> impl IntoView {
+    let ctx = ctx();
+    const KINDS: [(&str, &str, &str); 3] = [
+        ("status", "Check", "Returns true when the Wi-Fi is on, false when it's off, null if unsure. Run when the server starts, so it doesn't re-apply a setting that's already there."),
+        ("on", "Turn on", "Runs when Wi-Fi is allowed again. Throw an error to fail; its message shows on the Wi-Fi card."),
+        ("off", "Turn off", "Runs when Wi-Fi is out of time, in downtime or locked."),
+    ];
+    let scripts = RwSignal::new(None::<api::Scripts>);
+    let which = RwSignal::new(0usize);
+    // The text being edited for each script.
+    let edits = RwSignal::new([String::new(), String::new(), String::new()]);
+    let busy = RwSignal::new(false);
+    let result = RwSignal::new(None::<api::ScriptOutcome>);
+    spawn_local(async move {
+        match api::wifi_scripts().await {
+            Ok(s) => {
+                edits.set([s.status.clone(), s.on.clone(), s.off.clone()]);
+                scripts.set(Some(s));
+            }
+            Err(ApiError::Unauthorized) => ctx.set_auth(Auth::SignedOut),
+            Err(e) => ctx.say(e.to_string(), false),
+        }
+    });
+    let saved = move |i: usize| {
+        scripts.with(|s| s.as_ref().map(|s| [s.status.clone(), s.on.clone(), s.off.clone()][i].clone()).unwrap_or_default())
+    };
+    let default = move |i: usize| {
+        scripts.with(|s| {
+            s.as_ref().map(|s| [s.default_status.clone(), s.default_on.clone(), s.default_off.clone()][i].clone()).unwrap_or_default()
+        })
+    };
+    let dirty = move || edits.with(|e| e[which.get()] != saved(which.get()));
+    let save = move |_| {
+        let i = which.get_untracked();
+        let code = edits.with_untracked(|e| e[i].clone());
+        let code = if code.trim() == default(i).trim() { String::new() } else { code };
+        busy.set(true);
+        spawn_local(async move {
+            match api::save_script(KINDS[i].0, &code).await {
+                Ok(()) => {
+                    scripts.update(|s| {
+                        if let Some(s) = s {
+                            let text = if code.is_empty() { default(i) } else { code.clone() };
+                            match i {
+                                0 => s.status = text,
+                                1 => s.on = text,
+                                _ => s.off = text,
+                            }
+                        }
+                    });
+                    ctx.say("Script saved", true);
+                    ctx.refresh();
+                }
+                Err(ApiError::Unauthorized) => ctx.set_auth(Auth::SignedOut),
+                Err(e) => ctx.say(e.to_string(), false),
+            }
+            busy.set(false);
+        });
+    };
+    let reset = move |_| {
+        let i = which.get_untracked();
+        edits.update(|e| e[i] = default(i));
+    };
+    let test = move |_| {
+        let i = which.get_untracked();
+        let (kind, label, _) = KINDS[i];
+        if kind != "status"
+            && !confirm_action(&format!("{label}: this runs the script now and changes the real Wi-Fi. Go ahead?"))
+        {
+            return;
+        }
+        let code = edits.with_untracked(|e| e[i].clone());
+        busy.set(true);
+        result.set(None);
+        spawn_local(async move {
+            match api::test_script(kind, &code).await {
+                Ok(o) => {
+                    result.set(Some(o));
+                    ctx.refresh();
+                }
+                Err(ApiError::Unauthorized) => ctx.set_auth(Auth::SignedOut),
+                Err(e) => ctx.say(e.to_string(), false),
+            }
+            busy.set(false);
+        });
+    };
+    view! {
+        <div class="card form scripts">
+            <h3>"Router scripts"</h3>
+            <p class="muted small">"JavaScript that switches the router. The built-in ones drive a Netgear Nighthawk RS200; change them for another router. They get "<code>"router.url"</code>", "<code>"router.user"</code>" and "<code>"router.password"</code>" from above, and "<code>"await http({method, url, headers, form, body})"</code>" (cookies kept, URLs starting with / go to the router), "<code>"btoa"</code>", "<code>"atob"</code>", "<code>"sleep(ms)"</code>" and "<code>"console.log"</code>". Each run has a minute."</p>
+            <div class="segmented" role="tablist" aria-label="Script">
+                {KINDS.iter().enumerate().map(|(i, (_, label, _))| view! {
+                    <button type="button" role="tab" aria-selected=move || (which.get() == i).to_string()
+                        class:on=move || which.get() == i
+                        on:click=move |_| { which.set(i); result.set(None); }>{*label}</button>
+                }).collect_view()}
+            </div>
+            <p class="muted small">{move || KINDS[which.get()].2}</p>
+            <Show when=move || scripts.with(|s| s.is_some()) fallback=|| view! { <p class="muted">"Loading\u{2026}"</p> }>
+                <textarea class="code" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"
+                    aria-label="Script"
+                    prop:value=move || edits.with(|e| e[which.get()].clone())
+                    on:input=move |ev| {
+                        let v = event_target_value(&ev);
+                        edits.update(|e| e[which.get_untracked()] = v);
+                    }/>
+            </Show>
+            <div class="row">
+                <button type="button" class="primary" disabled=move || busy.get() || !dirty() on:click=save>"Save"</button>
+                <button type="button" class="ghost" disabled=move || busy.get() on:click=test>
+                    {move || if busy.get() { "Running\u{2026}".to_string() } else { format!("Test {}", KINDS[which.get()].1.to_lowercase()) }}
+                </button>
+                <button type="button" class="ghost" disabled=move || edits.with(|e| e[which.get()] == default(which.get())) on:click=reset>"Reset to default"</button>
+            </div>
+            {move || result.get().map(|o| {
+                let head = if o.ok {
+                    match &o.value {
+                        serde_json::Value::Null => "Done".to_string(),
+                        v => format!("Done: returned {v}"),
+                    }
+                } else {
+                    format!("Failed: {}", o.message.clone().unwrap_or_default())
+                };
+                view! {
+                    <div class="script-result" class:bad=!o.ok>
+                        <strong>{head}</strong>
+                        {(!o.logs.is_empty()).then(|| view! { <pre>{o.logs.join("\n")}</pre> })}
+                    </div>
+                }
+            })}
+        </div>
     }
 }
 

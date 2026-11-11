@@ -178,11 +178,22 @@ downtime or locked, the server switches the router's main 2.4 GHz and 5 GHz radi
 6 GHz radio is left alone), and back on when it's allowed again. Pausing Wi-Fi time stops the
 switching and, if the server had switched the Wi-Fi off, turns it back on.
 
-It drives a Netgear Nighthawk RS200 through its web admin pages (log in, read the Advanced
-Wireless page's one-time token, post the form, log out). The router allows one admin session at a
-time, so the server only logs in when the Wi-Fi needs to change: once at start, then when the
-schedule says so. Failures are retried every minute (every 15 minutes after a refused login, to
-avoid the router's lockout) and shown on the Wi-Fi card.
+The router is switched by three JavaScript scripts, edited under Account → Router scripts:
+**Check** (returns whether the Wi-Fi is on; run when the server starts, so a restart doesn't
+re-apply a setting that's already there), **Turn on** and **Turn off**. The built-in ones drive a
+Netgear Nighthawk RS200 through its web admin pages (log in, read the Advanced Wireless page's
+one-time token and radio settings, post the form, log out); replace them for another router.
+Each has a Test button (Turn on/off ask first, since they change the real Wi-Fi).
+
+Scripts run in an embedded QuickJS with a one-minute limit and no file access. They get
+`router.url`, `router.user` and `router.password` (the password is filled in at run time, never
+stored in the script), `await http({method, url, headers, form, body, timeout})` returning
+`{status, headers, body}` (cookies kept for the run, a browser User-Agent, URLs starting with
+`/` go to the router), `btoa`, `atob`, `await sleep(ms)`, `console.log` and
+`RouterError(message, badPassword)`. A script fails by throwing; the message shows on the Wi-Fi
+card. The router allows one admin session at a time, so scripts run one at a time and only when
+the Wi-Fi needs to change. Failures are retried every minute (every 15 minutes after a
+`RouterError` with `badPassword`, to avoid the router's lockout).
 
 Set it up under Account → Wi-Fi router: the router's address (default `http://192.168.1.1`),
 username (`admin`) and password, then tick "Switch the Wi-Fi by its schedule and time". Nothing

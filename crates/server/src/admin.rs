@@ -45,6 +45,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/push/test", post(push_test))
         .route("/api/wifi", get(wifi))
         .route("/api/wifi/settings", put(wifi_settings))
+        .route("/api/wifi/scripts", get(wifi_scripts))
+        .route("/api/wifi/test", post(wifi_test))
 }
 
 #[derive(Deserialize)]
@@ -511,4 +513,25 @@ async fn wifi_settings(
         Err(crate::wifi::SettingsError::Invalid(m)) => Err(AppError::BadRequest(m)),
         Err(crate::wifi::SettingsError::Other(e)) => Err(e.into()),
     }
+}
+
+async fn wifi_scripts(State(s): State<AppState>, _: Admin) -> AppResult<Json<crate::wifi::Scripts>> {
+    Ok(Json(crate::wifi::scripts(&s.db).await?))
+}
+
+#[derive(Deserialize)]
+struct ScriptTest {
+    script: crate::wifi::Script,
+    /// Run this instead of the saved script, e.g. unsaved edits.
+    code: Option<String>,
+}
+
+/// Run a router script now. On and off change the real Wi-Fi; the page asks first.
+async fn wifi_test(
+    State(s): State<AppState>,
+    _: Admin,
+    Json(body): Json<ScriptTest>,
+) -> AppResult<Json<crate::script::Outcome>> {
+    tracing::info!(script = ?body.script, "router script test from web");
+    Ok(Json(crate::wifi::test_script(&s, body.script, body.code).await?))
 }

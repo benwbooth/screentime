@@ -934,3 +934,64 @@ async fn wifi_already_on_is_left_alone() {
     let r = router.lock().unwrap();
     assert_eq!((r.logins, r.logouts, r.changes.len()), (1, 1, 0));
 }
+
+#[tokio::test]
+async fn router_scripts_can_be_edited_and_tested() {
+    let s = server(with_password()).await;
+    let me = s.admin_cookie().await;
+    let me = Some(me.as_str());
+    let (url, router) = fake_router("router secret").await;
+    let settings = json!({"router_url": url, "router_password": "router secret"});
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(settings)).await.0, StatusCode::OK);
+
+    // The built-in scripts, with the defaults alongside; the password isn't in them.
+    let (status, _, body) = s.call("GET", "/api/wifi/scripts", me, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("router secret"));
+    let scripts: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(scripts["on"], scripts["default_on"]);
+    assert!(scripts["off"].as_str().unwrap().contains("const WANT = \"off\""));
+
+    // Testing the status script reads the radios (on) without changing anything.
+    let (_, _, body) = s.call("POST", "/api/wifi/test", me, Some(json!({"script": "status"}))).await;
+    let o: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!((o["ok"].as_bool(), o["value"].as_bool()), (Some(true), Some(true)), "{o}");
+    assert!(router.lock().unwrap().changes.is_empty());
+    let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
+    assert_eq!(w["router"]["on"], true);
+
+    // Unsaved edits can be tried; logs and errors come back.
+    let code = "console.log('user is', router.user); throw new Error('custom failure')";
+    let (_, _, body) = s.call("POST", "/api/wifi/test", me, Some(json!({"script": "off", "code": code}))).await;
+    let o: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(o["ok"], false);
+    assert_eq!(o["message"], "custom failure");
+    assert_eq!(o["logs"], json!(["user is admin"]));
+
+    // A saved custom script is what the server runs, and its error shows on the Wi-Fi card.
+    let custom = json!({"script_off": "throw new Error('my off script broke')"});
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(custom)).await.0, StatusCode::OK);
+    let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
+    assert_eq!(w["custom_scripts"], json!(["off"]));
+    tokio::spawn(screentime_server::wifi::run(s.state.clone()));
+    s.call("PUT", "/api/users/wifi/lock", me, Some(json!({"computer": null, "locked": true}))).await;
+    s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": true}))).await;
+    let mut error = Value::Null;
+    for _ in 0..200 {
+        let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
+        error = w["router"]["last_error"].clone();
+        if !error.is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(error, "my off script broke");
+    assert!(router.lock().unwrap().changes.is_empty());
+
+    // Saving it empty goes back to the built-in script.
+    s.call("PUT", "/api/wifi/settings", me, Some(json!({"script_off": ""}))).await;
+    let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
+    assert_eq!(w["custom_scripts"], json!([]));
+    let too_long = "x".repeat(70_000);
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(json!({"script_on": too_long}))).await.0, StatusCode::BAD_REQUEST);
+}
