@@ -717,12 +717,14 @@ struct FakeRouter {
     changes: Vec<String>,
     logins: u32,
     logouts: u32,
+    /// What the radios are set to now. The real router starts with them on.
+    radios_on: bool,
 }
 
 async fn fake_router(password: &'static str) -> (String, Arc<Mutex<FakeRouter>>) {
     use axum::extract::Request as AxRequest;
     use base64ct::{Base64, Encoding};
-    let seen = Arc::new(Mutex::new(FakeRouter::default()));
+    let seen = Arc::new(Mutex::new(FakeRouter { radios_on: true, ..FakeRouter::default() }));
     let state = seen.clone();
     let handler = move |req: AxRequest| {
         let seen = state.clone();
@@ -730,7 +732,8 @@ async fn fake_router(password: &'static str) -> (String, Arc<Mutex<FakeRouter>>)
             let path = req.uri().path().to_owned();
             let query = req.uri().query().unwrap_or("").to_owned();
             let cookie = req.headers().get(header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
-            let signed_in = cookie.contains("sess=good");
+            let browser = req.headers().get(header::USER_AGENT).is_some_and(|v| v.as_bytes().starts_with(b"Mozilla/"));
+            let signed_in = cookie.contains("sess=good") && browser;
             let body = String::from_utf8(req.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
             let form: Vec<(String, String)> = serde_urlencoded::from_str(&body).unwrap_or_default();
             let field = |k: &str| form.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
@@ -747,16 +750,26 @@ async fn fake_router(password: &'static str) -> (String, Arc<Mutex<FakeRouter>>)
                     let outer = String::from_utf8(Base64::decode_vec(&field("password")).unwrap()).unwrap();
                     let inner = Base64::decode_vec(&outer[1..outer.len() - 1]).unwrap();
                     let good = field("submit_flag") == "admin_login" && field("username") == "admin" && inner == password.as_bytes();
-                    ok(good.then_some("sess=good; path=/"), "<html>ok</html>".into())
+                    ok(good.then_some("sess=good;Path=/;HttpOnly;SameSite=Lax;"), String::new())
                 }
                 ("/WLG_adv.htm", _) if signed_in => {
-                    ok(None, r#"<form action="/apply.cgi?/WLG_adv.htm timestamp=99887766" method="post">"#.into())
+                    let on = if seen.lock().unwrap().radios_on { "1" } else { "0" };
+                    let page = format!(
+                        "var con_endis_wl_radio='{on}';\nvar con_endis_wla_radio='{on}';\n\
+                         <form action=\"/apply.cgi?/WLG_adv.htm timestamp=99887766\" method=\"post\">"
+                    );
+                    ok(None, page)
                 }
-                ("/WLG_adv.htm", _) => ok(None, r#"<input type="password" name="password">"#.into()),
+                ("/WLG_adv.htm", _) => ok(
+                    None,
+                    r#"else if(result == 3) top.location.href="multi_login.html"; <input type="password" name="password">"#.into(),
+                ),
                 ("/apply.cgi", "/WLG_adv.htm%20timestamp=99887766") if signed_in => {
                     assert_eq!(field("wla_enable_router"), field("wl_enable_router"));
                     assert_eq!(field("wla_6g_enable_router"), "1");
-                    seen.lock().unwrap().changes.push(field("wl_enable_router"));
+                    let mut r = seen.lock().unwrap();
+                    r.radios_on = field("wl_enable_router") == "1";
+                    r.changes.push(field("wl_enable_router"));
                     ok(None, "<html>applied</html>".into())
                 }
                 ("/LGO_logout.htm", _) => {
@@ -893,6 +906,31 @@ async fn wifi_reports_a_refused_router_login() {
     assert!(error.as_str().unwrap().contains("refused the login"), "{error}");
     // A refused login isn't retried right away (the router locks the admin out).
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let r = router.lock().unwrap();
+    assert_eq!((r.logins, r.logouts, r.changes.len()), (1, 1, 0));
+}
+
+#[tokio::test]
+async fn wifi_already_on_is_left_alone() {
+    let s = server(with_password()).await;
+    let me = s.admin_cookie().await;
+    let me = Some(me.as_str());
+    let (url, router) = fake_router("router secret").await;
+    tokio::spawn(screentime_server::wifi::run(s.state.clone()));
+    // No limit and the radios already on: the server checks, and doesn't re-apply (which would
+    // restart the radios).
+    let settings = json!({"router_url": url, "router_password": "router secret", "enabled": true});
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(settings)).await.0, StatusCode::OK);
+    let mut on = Value::Null;
+    for _ in 0..200 {
+        let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
+        on = w["router"]["on"].clone();
+        if !on.is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(on, true);
     let r = router.lock().unwrap();
     assert_eq!((r.logins, r.logouts, r.changes.len()), (1, 1, 0));
 }

@@ -380,16 +380,22 @@ pub mod netgear {
     }
 
     /// Why the settings page came back without its token.
-    pub fn explain_missing_token(html: &str, login_status: u16, page_status: u16) -> Failure {
+    /// Why the settings page came back without its token. `login_reply` is the body of the login
+    /// post: the router's own login page treats "3" as another admin signed in and "5" as refused.
+    pub fn explain_missing_token(html: &str, login_reply: &str, login_status: u16, page_status: u16) -> Failure {
         let l = html.to_ascii_lowercase();
-        let multi_login = l.match_indices("multi").any(|(i, _)| {
-            let rest = &l[i + 5..];
-            rest.starts_with("login") || rest.get(1..).is_some_and(|r| r.starts_with("login"))
-        });
-        if multi_login || l.contains("already logged in") || l.contains("another user") || l.contains("another admin") {
+        let login_page =
+            l.contains("admin_login") || ["type=password", "type=\"password", "type='password"].iter().any(|p| l.contains(p));
+        let another_admin = login_reply.trim() == "3"
+            || l.contains("already logged in")
+            || l.contains("another user")
+            || l.contains("another admin")
+            // The login page itself links to multi_login.html, so only count it elsewhere.
+            || (!login_page && l.contains("multi_login"));
+        if another_admin {
             return Failure::new("another admin session is open on the router (its web page or the Nighthawk app)");
         }
-        if l.contains("admin_login") || ["type=password", "type=\"password", "type='password"].iter().any(|p| l.contains(p)) {
+        if login_reply.trim() == "5" || login_page {
             return Failure {
                 message: "the router refused the login (wrong password, or locked out after too many tries)".into(),
                 bad_password: true,
@@ -398,6 +404,17 @@ pub mod netgear {
         Failure::new(format!(
             "the router didn't return its settings page (login HTTP {login_status}, page HTTP {page_status})"
         ))
+    }
+
+    /// The radios' current settings on the Advanced Wireless page: (2.4 GHz, 5 GHz) on or off.
+    pub fn radios(html: &str) -> Option<(bool, bool)> {
+        let var = |name: &str| {
+            let at = html.find(&format!("var {name}="))? + name.len() + 5;
+            let quote = html[at..].chars().next()?;
+            let value = html[at + 1..].split(quote).next()?;
+            Some(value == "1")
+        };
+        Some((var("con_endis_wl_radio")?, var("con_endis_wla_radio")?))
     }
 
     /// The Advanced Wireless form as captured from the router. Only the two radio switches change
@@ -535,6 +552,8 @@ pub mod netgear {
         let base = router.url.trim_end_matches('/');
         let http = reqwest::Client::builder()
             .cookie_store(true)
+            // Without a browser's User-Agent the router keeps serving its login page.
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
             .build()
             .map_err(|e| Failure::new(format!("HTTP client: {e}")))?;
 
@@ -550,15 +569,22 @@ pub mod netgear {
             .await
             .map_err(|e| unreachable(router, e))?;
         let login_status = login.status().as_u16();
-        let _ = login.bytes().await;
+        let login_reply = login.text().await.unwrap_or_default();
 
-        let result = change(&http, router, base, on, login_status).await;
+        let result = change(&http, router, base, on, &login_reply, login_status).await;
         // The router allows one admin session at a time, so always end ours.
         let _ = http.get(format!("{base}/LGO_logout.htm")).timeout(Duration::from_secs(5)).send().await;
         result
     }
 
-    async fn change(http: &reqwest::Client, router: &Router<'_>, base: &str, on: bool, login_status: u16) -> Result<(), Failure> {
+    async fn change(
+        http: &reqwest::Client,
+        router: &Router<'_>,
+        base: &str,
+        on: bool,
+        login_reply: &str,
+        login_status: u16,
+    ) -> Result<(), Failure> {
         let page = http
             .get(format!("{base}/WLG_adv.htm"))
             .timeout(Duration::from_secs(10))
@@ -569,8 +595,13 @@ pub mod netgear {
         let html = page.text().await.map_err(|e| unreachable(router, e))?;
         // Without the token the router answers 400, so don't send the change.
         let Some(token) = form_token(&html) else {
-            return Err(explain_missing_token(&html, login_status, page_status));
+            return Err(explain_missing_token(&html, login_reply, login_status, page_status));
         };
+        // Already that way: applying wireless settings restarts the radios, so don't.
+        if radios(&html) == Some((on, on)) {
+            tracing::info!(on, "the Wi-Fi is already switched that way");
+            return Ok(());
+        }
         let applied = http
             .post(format!("{base}/apply.cgi?/WLG_adv.htm%20timestamp={token}"))
             .timeout(Duration::from_secs(20))
@@ -614,10 +645,22 @@ mod tests {
 
     #[test]
     fn explains_why_there_was_no_token() {
-        assert!(explain_missing_token("<input type=\"password\">", 200, 200).bad_password);
-        let multi = explain_missing_token("multi_login.html", 200, 200);
+        // The router's login page links to multi_login.html from its own script.
+        let login_page = r#"submit_flag": "admin_login" top.location.href="multi_login.html"; <input type="password">"#;
+        assert!(explain_missing_token(login_page, "", 200, 200).bad_password);
+        assert!(explain_missing_token(login_page, "5", 200, 200).bad_password);
+        let multi = explain_missing_token(login_page, "3", 200, 200);
         assert!(!multi.bad_password && multi.message.contains("another admin"));
-        assert!(explain_missing_token("", 500, 404).message.contains("HTTP 500"));
+        assert!(explain_missing_token("<p>multi_login</p>", "", 200, 200).message.contains("another admin"));
+        assert!(explain_missing_token("", "", 500, 404).message.contains("HTTP 500"));
+    }
+
+    #[test]
+    fn reads_the_radios() {
+        let page = "var con_endis_wl_radio='0';\nvar x=1;\nvar con_endis_wla_radio='1';";
+        assert_eq!(radios(page), Some((false, true)));
+        assert_eq!(radios("var con_endis_wl_radio=\"1\"; var con_endis_wla_radio=\"1\";"), Some((true, true)));
+        assert_eq!(radios("nothing"), None);
     }
 
     #[test]
