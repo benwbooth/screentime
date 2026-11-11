@@ -1,4 +1,5 @@
-//! Sessions through the WTS API, locking by disconnecting, logging off, Windows logon hours,
+//! Sessions through the WTS API, locking (LockWorkStation run in the kid's session), logging off,
+//! Windows logon hours,
 //! the admin password check, and keeping the tray app running in the kid's session.
 
 use super::{from_wide, pcwstr, wide};
@@ -45,6 +46,8 @@ const TRAY_EXE: &str = "screentime-tray.exe";
 /// How soon the tray app is started again after it's closed (it runs as the kid, who can end it
 /// in Task Manager).
 const TRAY_RETRY: Duration = Duration::from_secs(15);
+/// How long a session may keep refusing to lock before it is disconnected instead.
+const LOCK_FALLBACK: Duration = Duration::from_secs(60);
 
 pub struct Windows {
     /// Mirror the schedule into Windows logon hours (on unless SCREENTIME_LOGON_HOURS=off).
@@ -52,6 +55,8 @@ pub struct Windows {
     /// Last logon-hours map written for each user, so Windows is only told about changes.
     logon_hours: Mutex<HashMap<String, [u8; logon_hours::BYTES]>>,
     tray_started: Mutex<HashMap<u32, Instant>>,
+    /// When we first asked each session to lock and it still hasn't, for the disconnect fallback.
+    lock_pending: Mutex<HashMap<u32, Instant>>,
 }
 
 impl Windows {
@@ -66,7 +71,7 @@ impl Windows {
         if !use_logon_hours {
             tracing::warn!("logon hours are off: sign-in is only blocked while the service is running");
         }
-        Windows { use_logon_hours, logon_hours: Mutex::default(), tray_started: Mutex::default() }
+        Windows { use_logon_hours, logon_hours: Mutex::default(), tray_started: Mutex::default(), lock_pending: Mutex::default() }
     }
 
     fn ensure_tray(&self, session_id: u32) {
@@ -78,7 +83,7 @@ impl Windows {
             return;
         }
         started.insert(session_id, Instant::now());
-        match start_in_session(session_id) {
+        match start_in_session(session_id, "") {
             Ok(()) => tracing::info!(session_id, "started the tray app"),
             Err(e) => tracing::warn!(session_id, "couldn't start the tray app: {e:#}"),
         }
@@ -87,10 +92,17 @@ impl Windows {
 
 impl Platform for Windows {
     async fn sessions(&self) -> Result<Vec<Session>> {
-        list_sessions()
+        let sessions = list_sessions()?;
+        // A lock that took is done; the next unlock starts the fallback clock afresh.
+        self.lock_pending
+            .lock()
+            .unwrap()
+            .retain(|id, _| sessions.iter().any(|s| s.id == id.to_string() && !s.locked));
+        Ok(sessions)
     }
 
     fn on_allowed_session(&self, session: &Session) {
+        self.lock_pending.lock().unwrap().remove(&session.id.parse().unwrap_or(0));
         // Only into sessions that are staying: starting it in one being shut out crashed it.
         self.ensure_tray(session.id.parse().unwrap_or(0));
     }
@@ -110,10 +122,20 @@ impl Platform for Windows {
     }
 
     async fn lock(&self, session: &Session) -> Result<()> {
-        // Disconnecting the console session drops it to the sign-in screen with everything still
-        // open, which is what a lock is; a service can't call LockWorkStation for another session.
+        // A service can't call LockWorkStation for another session, so run the tray exe as the
+        // kid with `--lock`, which locks and exits: the ordinary lock screen, with everything
+        // (games included) still running. Never disconnect a session that is still signing in:
+        // Windows abandons the logon and signs the kid out, which is what kids saw as being
+        // logged out. Only if locking keeps failing on an established session is it disconnected.
         let id: u32 = session.id.parse()?;
-        unsafe { WTSDisconnectSession(None, id, false) }.context("WTSDisconnectSession")
+        let first = *self.lock_pending.lock().unwrap().entry(id).or_insert_with(Instant::now);
+        let started = start_in_session(id, "--lock");
+        if first.elapsed() >= LOCK_FALLBACK {
+            tracing::warn!(session_id = id, "session still not locked, disconnecting it instead");
+            self.lock_pending.lock().unwrap().remove(&id);
+            return unsafe { WTSDisconnectSession(None, id, false) }.context("WTSDisconnectSession");
+        }
+        started.context("starting the lock helper")
     }
 
     async fn end_sessions(&self, _user: &str, sessions: &[Session]) -> Result<()> {
@@ -422,12 +444,12 @@ fn tray_running_in(session_id: u32) -> bool {
 /// implicit right to rewrite this list.
 const TRAY_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x101000;;;OW)";
 
-fn start_in_session(session_id: u32) -> Result<()> {
+fn start_in_session(session_id: u32, args: &str) -> Result<()> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     let exe = std::env::current_exe()?.with_file_name(TRAY_EXE);
-    let mut cmd = wide(&format!("\"{}\"", exe.display()));
+    let mut cmd = wide(format!("\"{}\" {args}", exe.display()).trim_end());
     let mut desktop = wide(r"winsta0\default");
     let sddl = wide(TRAY_SDDL);
     let mut descriptor = PSECURITY_DESCRIPTOR::default();

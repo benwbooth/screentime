@@ -391,6 +391,11 @@ mod tray {
     }
 
     pub fn main() -> Result<()> {
+        // `--lock`: the service runs this as the kid to lock their session (out of time, or
+        // locked by a parent), since a service can't lock someone else's session itself.
+        if std::env::args().any(|a| a == "--lock") {
+            return unsafe { windows::Win32::System::Shutdown::LockWorkStation() }.context("LockWorkStation");
+        }
         // There's no console, so leave a note where a parent can find it if this ever panics.
         std::panic::set_hook(Box::new(|info| {
             let path = std::env::temp_dir().join("screentime-tray-panic.txt");

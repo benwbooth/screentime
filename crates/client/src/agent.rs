@@ -352,9 +352,11 @@ impl<P: Platform> Agent<P> {
                     return;
                 }
                 if !t.in_allowed_session && t.denied_since.is_none_or(|at| at.elapsed() >= FRESH_SIGN_IN_GRACE) {
-                    // Signed in (or back in) while already out of time: straight back to the
-                    // sign-in screen, and signed out moments later; no grace for using it.
-                    tracing::info!(user, %reason, "signed in while out of time, ending sessions");
+                    // Signed in (or unlocked) while already out of time: locked again at once, no
+                    // grace for using it; signed out moments later only if sign_out is on.
+                    if sessions.iter().any(|s| !s.locked) {
+                        tracing::info!(user, %reason, "signed in or unlocked while out of time, locking again");
+                    }
                     for s in sessions.iter().filter(|s| !s.locked) {
                         if let Err(e) = self.platform.lock(s).await {
                             tracing::warn!(user, session = %s.id, "lock failed: {e:#}");
