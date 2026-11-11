@@ -134,7 +134,30 @@ pub async fn open_db(url: &str) -> anyhow::Result<SqlitePool> {
         // fsyncs than FULL, which made single UPDATEs take seconds on a busy disk.
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(std::time::Duration::from_secs(30));
-    let pool = SqlitePoolOptions::new().connect_with(options).await?;
+    let pool = SqlitePoolOptions::new()
+        // A request cancelled while its transaction was starting (the client hung up) leaves
+        // the connection inside BEGIN IMMEDIATE with nobody to commit or roll back, holding
+        // the write lock forever: every later write then waited out the busy timeout and
+        // failed. Roll back whatever a connection still has open when it goes back to the pool.
+        .after_release(|conn, _| {
+            Box::pin(async move {
+                use sqlx::TransactionManager;
+                use sqlx::sqlite::SqliteTransactionManager as Tm;
+                if Tm::get_transaction_depth(conn) == 0 {
+                    return Ok(true);
+                }
+                tracing::warn!("a database connection came back with a transaction open; rolling it back");
+                while Tm::get_transaction_depth(conn) > 0 {
+                    if Tm::rollback(conn).await.is_err() {
+                        // Closing the connection releases its locks for sure.
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })
+        })
+        .connect_with(options)
+        .await?;
     sqlx::migrate!().run(&pool).await?;
     Ok(pool)
 }
