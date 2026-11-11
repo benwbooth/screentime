@@ -124,7 +124,7 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ rustc cargo clippy rustfmt rust-analyzer sqlx-cli wasm-bindgen-cli pam ];
+          packages = with pkgs; [ rustc cargo clippy rustfmt rust-analyzer sqlx-cli wasm-bindgen-cli lld pam ];
         };
       });
     };
