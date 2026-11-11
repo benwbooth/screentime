@@ -34,7 +34,7 @@ final class Connection {
         let path = socketPath()
         let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
         guard path.utf8.count < maxLen else { close(fd); throw SocketError.failed("socket path too long") }
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+        _ = withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
             ptr.withMemoryRebound(to: CChar.self, capacity: maxLen) { strncpy($0, path, maxLen) }
         }
         let ok = withUnsafePointer(to: &addr) {
