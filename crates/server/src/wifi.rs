@@ -12,7 +12,6 @@ use chrono::{Local, Utc};
 use screentime_common::{Decision, UsageReport, evaluate};
 use serde::Serialize;
 use sqlx::SqlitePool;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
@@ -45,8 +44,6 @@ pub struct Wifi {
     router_busy: Mutex<()>,
     router: Mutex<RouterStatus>,
     wake: Notify,
-    /// Settings changed: try the router again now instead of waiting out a back-off.
-    retry_now: AtomicBool,
 }
 
 impl Wifi {
@@ -60,7 +57,7 @@ impl Wifi {
     }
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Row {
     pub enabled: bool,
     pub router_url: String,
@@ -240,7 +237,6 @@ pub async fn change_settings(state: &AppState, change: SettingsChange) -> Result
         .await?;
     drop(_guard);
     tracing::info!(enabled = row.enabled, router = %row.router_url, "Wi-Fi settings changed");
-    state.wifi.retry_now.store(true, Ordering::SeqCst);
     state.wifi.poke();
     Ok(())
 }
@@ -376,20 +372,22 @@ async fn switch(state: &AppState, row: &Row, on: bool, known: Option<bool>) -> R
 /// Keep the router in line with the schedule, and count the minutes the Wi-Fi is on. Runs for
 /// the life of the server: once at start, then whenever something changes, and every TICK.
 pub async fn run(state: AppState) {
-    let mut retry_at: Option<Instant> = None;
+    // After a failure, when to try again, and with which settings: changed settings (a new
+    // password, say) are tried at once.
+    let mut retry_at: Option<(Instant, Row)> = None;
     let mut last = Instant::now();
     // Time on not yet recorded as a whole minute.
     let mut unrecorded = Duration::ZERO;
     loop {
-        if state.wifi.retry_now.swap(false, Ordering::SeqCst) {
-            retry_at = None;
-        }
         let now = Instant::now();
         let elapsed = now - last;
         last = now;
         let mut sleep_for = TICK;
         match load(&state.db).await {
             Ok(row) => {
+                if retry_at.as_ref().is_some_and(|(_, failed)| *failed != row) {
+                    retry_at = None;
+                }
                 let current = state.wifi.router.lock().await.on;
                 // Minutes count while Wi-Fi time is on and the Wi-Fi is on.
                 if row.enabled && row.password_set() && current == Some(true) {
@@ -415,7 +413,7 @@ pub async fn run(state: AppState) {
                 };
                 if let Some(on) = wanted(&row, allowed, current)
                     && current != Some(on)
-                    && retry_at.is_none_or(|t| Instant::now() >= t)
+                    && retry_at.as_ref().is_none_or(|(t, _)| Instant::now() >= *t)
                 {
                     tracing::info!(on, "switching the Wi-Fi");
                     let result = switch(&state, &row, on, current).await;
@@ -438,7 +436,7 @@ pub async fn run(state: AppState) {
                             status.last_error = Some(message);
                             status.last_error_at = Some(now);
                             let wait = if e.bad_password { RETRY_AFTER_BAD_PASSWORD } else { RETRY_AFTER };
-                            retry_at = Some(Instant::now() + wait);
+                            retry_at = Some((Instant::now() + wait, row.clone()));
                         }
                     }
                     continue;
@@ -446,7 +444,8 @@ pub async fn run(state: AppState) {
             }
             Err(e) => tracing::warn!("reading Wi-Fi settings failed: {e:#}"),
         }
-        if let Some(t) = retry_at {
+        if let Some((t, _)) = &retry_at {
+            let t = *t;
             sleep_for = sleep_for.min(t.saturating_duration_since(Instant::now()).max(Duration::from_secs(1)));
         }
         tokio::select! {

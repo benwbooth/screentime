@@ -36,7 +36,7 @@ pub async fn ensure_user(db: &SqlitePool, username: &str, default_minutes: u32) 
     if let Some(id) = user_id(db, username).await? {
         return Ok(id);
     }
-    let mut tx = db.begin().await?;
+    let mut tx = write_tx(db).await?;
     let id: i64 = sqlx::query_scalar("INSERT INTO users (username) VALUES (?) RETURNING id")
         .bind(username)
         .fetch_one(&mut *tx)
@@ -72,7 +72,7 @@ pub async fn allowances(db: &SqlitePool, user: i64) -> Result<Allowances> {
 }
 
 pub async fn set_allowances(db: &SqlitePool, user: i64, allowances: &Allowances) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = write_tx(db).await?;
     sqlx::query("DELETE FROM daily_allowances WHERE user_id = ?").bind(user).execute(&mut *tx).await?;
     for (weekday, minutes) in allowances.iter().enumerate() {
         if let Some(minutes) = minutes {
@@ -102,7 +102,7 @@ pub async fn downtime(db: &SqlitePool, user: i64) -> Result<Vec<DowntimeWindow>>
 }
 
 pub async fn set_downtime(db: &SqlitePool, user: i64, windows: &[DowntimeWindow]) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = write_tx(db).await?;
     sqlx::query("DELETE FROM downtime_windows WHERE user_id = ?").bind(user).execute(&mut *tx).await?;
     for w in windows {
         sqlx::query("INSERT INTO downtime_windows (user_id, days, start_time, end_time) VALUES (?, ?, ?, ?)")
@@ -174,7 +174,7 @@ pub async fn usage(db: &SqlitePool, user: i64, day: NaiveDate) -> Result<Vec<Hos
 }
 
 pub async fn record_usage(db: &SqlitePool, user: i64, host: &str, report: &UsageReport) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = write_tx(db).await?;
     let before: u32 = sqlx::query_scalar::<_, i64>("SELECT active_minutes FROM usage WHERE user_id = ? AND host = ? AND day = ?")
         .bind(user)
         .bind(host)
@@ -468,7 +468,7 @@ pub async fn list_requests(db: &SqlitePool, pending_only: bool, limit: i64) -> R
 /// Grant `minutes` (0 denies) for a pending request, adding the bonus to `today`.
 /// Returns `None` if the request was already handled, so each link works once.
 pub async fn resolve_request(db: &SqlitePool, id: i64, minutes: u32, today: NaiveDate) -> Result<Option<RequestRow>> {
-    let mut tx = db.begin().await?;
+    let mut tx = write_tx(db).await?;
     let status = if minutes == 0 { "denied" } else { "granted" };
     let user: Option<i64> = sqlx::query_scalar(
         "UPDATE time_requests SET status = ?, granted_minutes = ?, resolved_at = ?
@@ -688,3 +688,12 @@ mod tests {
         assert_eq!(mask_to_days(days_to_mask(&days)), days);
     }
 }
+
+/// A write transaction that takes the write lock up front (BEGIN IMMEDIATE). A plain BEGIN that
+/// reads first and then writes can't wait for another writer: SQLite fails it at once with
+/// "database is locked" instead of using the busy timeout, which is what several clients
+/// reporting usage at the same moment ran into.
+async fn write_tx(db: &SqlitePool) -> sqlx::Result<sqlx::Transaction<'static, sqlx::Sqlite>> {
+    db.begin_with("BEGIN IMMEDIATE").await
+}
+

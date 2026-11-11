@@ -129,7 +129,11 @@ pub async fn open_db(url: &str) -> anyhow::Result<SqlitePool> {
     let options = SqliteConnectOptions::from_str(url)?
         .create_if_missing(true)
         .foreign_keys(true)
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        // Safe with WAL (a power cut can lose the last commit, never corrupt), and far fewer
+        // fsyncs than FULL, which made single UPDATEs take seconds on a busy disk.
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(30));
     let pool = SqlitePoolOptions::new().connect_with(options).await?;
     sqlx::migrate!().run(&pool).await?;
     Ok(pool)
