@@ -785,57 +785,91 @@ async fn wait_for(mut done: impl FnMut() -> bool) {
 }
 
 #[tokio::test]
-async fn wifi_time_switches_the_router() {
+async fn wifi_is_a_built_in_user_that_switches_the_router() {
     let s = server(with_password()).await;
     let me = s.admin_cookie().await;
     let me = Some(me.as_str());
     let (url, router) = fake_router("router secret").await;
     tokio::spawn(screentime_server::wifi::run(s.state.clone()));
 
-    // Off and unconfigured to start with: nothing touches the router.
-    let (status, _, body) = s.call("GET", "/api/wifi", me, None).await;
-    assert_eq!(status, StatusCode::OK);
-    let w: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!((w["enabled"].as_bool(), w["password_set"].as_bool(), w["remaining_seconds"].as_i64()), (Some(false), Some(false), Some(0)));
-    assert_eq!(w["wanted_on"], Value::Null);
-    let (status, _, body) = s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": true}))).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(json!({"router_url": "ftp://x"}))).await.0, StatusCode::BAD_REQUEST);
+    // Wi-Fi is there from the start, after the kids, with no limit; nothing touches the router.
+    s.call("POST", "/api/users", me, Some(json!({"username": "ryan"}))).await;
+    let o: Value = serde_json::from_str(&s.call("GET", "/api/overview", me, None).await.2).unwrap();
+    let users = o["users"].as_array().unwrap();
+    assert_eq!(users.last().unwrap()["username"], "wifi");
+    assert_eq!(users.last().unwrap()["name"], "Wi-Fi");
+    assert_eq!(users.last().unwrap()["wifi"], true);
+    assert_eq!(users[0]["wifi"], false);
+    assert_eq!(o["wifi"]["enabled"], false);
+    assert_eq!(o["wifi"]["wanted_on"], Value::Null);
+    // It's not a kid: computers can't ask for it, accounts can't be it, and it can't be re-added.
+    let pc = db::add_client(&s.state.db, "pc1").await.unwrap();
+    assert_eq!(s.call("GET", "/api/client/policy/wifi", Some(&pc), None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(s.call("POST", "/api/users", me, Some(json!({"username": "wifi"}))).await.0, StatusCode::BAD_REQUEST);
+    let h: Value = serde_json::from_str(&s.call("GET", "/api/history?days=3", me, None).await.2).unwrap();
+    assert!(h.as_array().unwrap().iter().any(|k| k["username"] == "wifi" && k["wifi"] == true));
 
-    // Time added before it's turned on waits, without running down.
-    s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": 30}))).await;
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": true}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(s.call("PUT", "/api/wifi/settings", me, Some(json!({"router_url": "ftp://x"}))).await.0, StatusCode::BAD_REQUEST);
     let settings = json!({"router_url": url, "router_user": "admin", "router_password": "router secret"});
     let (status, _, body) = s.call("PUT", "/api/wifi/settings", me, Some(settings)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!body.contains("router secret"), "the password never goes back to the browser");
-    let w: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!((w["password_set"].as_bool(), w["remaining_minutes"].as_i64()), (Some(true), Some(30)));
+    assert!(!s.call("GET", "/api/overview", me, None).await.2.contains("router secret"));
     assert!(router.lock().unwrap().logins == 0);
 
-    // Turned on with time left: Wi-Fi on.
+    // A zero-minute day: turning Wi-Fi time on switches the Wi-Fi off.
+    s.call("PUT", "/api/users/wifi/allowances", me, Some(json!([0, 0, 0, 0, 0, 0, 0]))).await;
     s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": true}))).await;
-    wait_for(|| router.lock().unwrap().changes == ["1"]).await;
-    // Taking away more than is left stops at zero and switches it off.
-    let (_, _, body) = s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": -45}))).await;
-    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["remaining_seconds"], 0);
-    wait_for(|| router.lock().unwrap().changes == ["1", "0"]).await;
-    let (_, _, body) = s.call("GET", "/api/overview", me, None).await;
-    let o: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(o["wifi"]["router"]["on"], false);
-    assert_eq!(o["wifi"]["wanted_on"], false);
-    // Adding time turns it back on.
-    s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": 15}))).await;
-    wait_for(|| router.lock().unwrap().changes == ["1", "0", "1"]).await;
-    // Every login was followed by a logout.
+    wait_for(|| router.lock().unwrap().changes == ["0"]).await;
+    // Adding time turns it on; taking it away turns it off again.
+    s.call("POST", "/api/users/wifi/bonus", me, Some(json!({"minutes": 30}))).await;
+    wait_for(|| router.lock().unwrap().changes == ["0", "1"]).await;
+    let o: Value = serde_json::from_str(&s.call("GET", "/api/overview", me, None).await.2).unwrap();
+    assert_eq!(o["wifi"]["router"]["on"], true);
+    assert_eq!(o["users"].as_array().unwrap().last().unwrap()["time_left"], 30);
+    s.call("POST", "/api/users/wifi/bonus", me, Some(json!({"minutes": -45}))).await;
+    wait_for(|| router.lock().unwrap().changes == ["0", "1", "0"]).await;
+    // A lock turns it off whatever the time; unlocking with time left turns it on.
+    s.call("POST", "/api/users/wifi/bonus", me, Some(json!({"minutes": 15}))).await;
+    wait_for(|| router.lock().unwrap().changes.len() == 4).await;
+    s.call("PUT", "/api/users/wifi/lock", me, Some(json!({"computer": null, "locked": true}))).await;
+    wait_for(|| router.lock().unwrap().changes == ["0", "1", "0", "1", "0"]).await;
+    s.call("PUT", "/api/users/wifi/lock", me, Some(json!({"computer": null, "locked": false}))).await;
+    wait_for(|| router.lock().unwrap().changes.len() == 6).await;
+    // Downtime all day turns it off.
+    let all_day = json!([{"days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], "start": "00:00:00", "end": "00:00:00"}]);
+    let (status, _, body) = s.call("PUT", "/api/users/wifi/downtime", me, Some(all_day)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    wait_for(|| router.lock().unwrap().changes.len() == 7).await;
+    assert_eq!(router.lock().unwrap().changes.last().unwrap(), "0");
+    s.call("PUT", "/api/users/wifi/downtime", me, Some(json!([]))).await;
+    wait_for(|| router.lock().unwrap().changes.len() == 8).await;
+    // Every login was followed by a logout, and there were no errors.
     wait_for(|| { let r = router.lock().unwrap(); r.logins == r.logouts }).await;
     let w: Value = serde_json::from_str(&s.call("GET", "/api/wifi", me, None).await.2).unwrap();
-    assert!(w["remaining_seconds"].as_i64().unwrap() > 14 * 60);
     assert_eq!(w["router"]["last_error"], Value::Null);
     // Turning Wi-Fi time off while the server had the Wi-Fi off turns it back on.
-    s.call("POST", "/api/wifi/time", me, Some(json!({"minutes": -15}))).await;
-    wait_for(|| router.lock().unwrap().changes.len() == 4).await;
+    s.call("PUT", "/api/users/wifi/lock", me, Some(json!({"computer": null, "locked": true}))).await;
+    wait_for(|| router.lock().unwrap().changes.len() == 9).await;
     s.call("PUT", "/api/wifi/settings", me, Some(json!({"enabled": false}))).await;
-    wait_for(|| router.lock().unwrap().changes == ["1", "0", "1", "0", "1"]).await;
+    wait_for(|| router.lock().unwrap().changes.len() == 10).await;
+    assert_eq!(router.lock().unwrap().changes.last().unwrap(), "1");
+}
+
+#[tokio::test]
+async fn wifi_minutes_count_while_it_is_on() {
+    let s = server(with_password()).await;
+    let id = db::user_id(&s.state.db, "wifi").await.unwrap().unwrap();
+    let today = Local::now().date_naive();
+    // The server records them as use on the "router", like a computer reporting a kid's use.
+    let report = UsageReport { username: "wifi".into(), host: "router".into(), day: today, active_minutes: 5, local_bonus_minutes: 0 };
+    db::record_usage(&s.state.db, id, "router", &report).await.unwrap();
+    db::add_bonus(&s.state.db, id, today, 10, "web").await.unwrap();
+    db::set_allowances(&s.state.db, id, &[Some(0); 7]).await.unwrap();
+    assert_eq!(db::time_left(&s.state.db, id, today).await.unwrap(), Some(5));
+    let h = db::history(&s.state.db, id, today, 1).await.unwrap();
+    assert_eq!(h[0].minutes, 5);
 }
 
 #[tokio::test]

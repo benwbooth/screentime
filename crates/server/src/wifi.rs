@@ -1,20 +1,27 @@
-//! Wi-Fi time: one balance for the whole household. While it's turned on, the balance runs down
-//! in real time; at zero the server switches the router's Wi-Fi off, and adding time switches
-//! it back on.
+//! Wi-Fi time. Wi-Fi is a built-in user ("wifi", shown as "Wi-Fi") with everything a kid has:
+//! a daily limit, downtime, time added or taken away, a lock, and history. Minutes count while
+//! the Wi-Fi is on; when the Wi-Fi user is out of time, in downtime or locked, the server turns
+//! the router's Wi-Fi off, and turns it back on when it's allowed again.
 //!
 //! Nothing touches the router until a parent has saved the router password and turned Wi-Fi
 //! time on, so a fresh install (or an upgrade) never cuts the Wi-Fi by itself.
 
-use crate::AppState;
-use anyhow::Result;
-use chrono::{DateTime, Utc};
+use crate::{AppState, db};
+use anyhow::{Context, Result};
+use chrono::{Local, Utc};
+use screentime_common::{Decision, UsageReport, evaluate};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
-/// How often the controller looks at the balance even when nothing woke it.
+/// The built-in user that stands for the Wi-Fi.
+pub const USER: &str = "wifi";
+/// The "computer" its minutes are recorded under.
+pub const HOST: &str = "router";
+
+/// How often the controller looks at the schedule even when nothing woke it.
 const TICK: Duration = Duration::from_secs(15);
 /// Wait before trying the router again after it failed.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -33,8 +40,7 @@ pub struct RouterStatus {
 
 #[derive(Default)]
 pub struct Wifi {
-    /// Serializes changes to the balance.
-    balance: Mutex<()>,
+    settings: Mutex<()>,
     router: Mutex<RouterStatus>,
     wake: Notify,
     /// Settings changed: try the router again now instead of waiting out a back-off.
@@ -46,10 +52,8 @@ impl Wifi {
         self.router.lock().await.clone()
     }
 
-    fn poke(&self, retry_now: bool) {
-        if retry_now {
-            self.retry_now.store(true, Ordering::SeqCst);
-        }
+    /// Look at the schedule again now, e.g. after time was added or a lock changed.
+    pub fn poke(&self) {
         self.wake.notify_one();
     }
 }
@@ -57,60 +61,47 @@ impl Wifi {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Row {
     pub enabled: bool,
-    pub remaining_seconds: i64,
-    pub counted_at: String,
     pub router_url: String,
     pub router_user: String,
     pub router_password: Option<String>,
 }
 
 impl Row {
-    /// Seconds left right now.
-    pub fn remaining_at(&self, now: DateTime<Utc>) -> i64 {
-        if !self.enabled {
-            return self.remaining_seconds.max(0);
-        }
-        let since = DateTime::parse_from_rfc3339(&self.counted_at)
-            .map(|t| (now - t.with_timezone(&Utc)).num_seconds().max(0))
-            .unwrap_or(0);
-        (self.remaining_seconds - since).max(0)
-    }
-
     pub fn password_set(&self) -> bool {
         self.router_password.as_deref().is_some_and(|p| !p.is_empty())
     }
 }
 
 pub async fn load(db: &SqlitePool) -> Result<Row> {
-    Ok(sqlx::query_as(
-        "SELECT enabled, remaining_seconds, counted_at, router_url, router_user, router_password FROM wifi WHERE id = 1",
-    )
-    .fetch_one(db)
-    .await?)
+    Ok(sqlx::query_as("SELECT enabled, router_url, router_user, router_password FROM wifi WHERE id = 1")
+        .fetch_one(db)
+        .await?)
 }
 
-/// Write the balance as of now, so a change of rate (enabled or not) starts from the right count.
-async fn store_balance(db: &SqlitePool, remaining: i64, now: DateTime<Utc>) -> Result<()> {
-    sqlx::query("UPDATE wifi SET remaining_seconds = ?, counted_at = ? WHERE id = 1")
-        .bind(remaining.max(0))
-        .bind(now.to_rfc3339())
-        .execute(db)
-        .await?;
-    Ok(())
+pub async fn user_id(db: &SqlitePool) -> Result<i64> {
+    db::user_id(db, USER).await?.context("the built-in Wi-Fi user is missing")
 }
 
-/// Add (positive) or take away (negative) minutes. The balance never goes below zero.
-/// Returns the seconds left afterwards.
-pub async fn adjust(state: &AppState, minutes: i64) -> Result<i64> {
-    let _guard = state.wifi.balance.lock().await;
-    let now = Utc::now();
-    let row = load(&state.db).await?;
-    let left = (row.remaining_at(now) + minutes * 60).max(0);
-    store_balance(&state.db, left, now).await?;
-    drop(_guard);
-    state.wifi.poke(false);
-    tracing::info!(minutes, left_seconds = left, "Wi-Fi time adjusted");
-    Ok(left)
+/// Whether the Wi-Fi may be on right now, by its schedule, time and lock.
+pub async fn decision(db: &SqlitePool) -> Result<Decision> {
+    let id = user_id(db).await?;
+    let policy = db::policy_for(db, id, USER, "", Local::now().date_naive()).await?;
+    Ok(evaluate(Some(&policy), Local::now().naive_local(), 0))
+}
+
+/// Count `minutes` more of Wi-Fi use today.
+async fn record_use(db: &SqlitePool, minutes: u32) -> Result<()> {
+    let id = user_id(db).await?;
+    let day = Local::now().date_naive();
+    let so_far = db::usage(db, id, day).await?.into_iter().find(|u| u.host == HOST).map_or(0, |u| u.active_minutes);
+    let report = UsageReport {
+        username: USER.into(),
+        host: HOST.into(),
+        day,
+        active_minutes: so_far + minutes,
+        local_bonus_minutes: 0,
+    };
+    db::record_usage(db, id, HOST, &report).await
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -133,7 +124,7 @@ pub fn normalize_router_url(input: &str) -> Option<String> {
         && url.query().is_none()
         && url.username().is_empty()
         && url.password().is_none();
-    ok.then(|| with_scheme)
+    ok.then_some(with_scheme)
 }
 
 pub enum SettingsError {
@@ -148,8 +139,7 @@ impl<E: Into<anyhow::Error>> From<E> for SettingsError {
 }
 
 pub async fn change_settings(state: &AppState, change: SettingsChange) -> Result<(), SettingsError> {
-    let _guard = state.wifi.balance.lock().await;
-    let now = Utc::now();
+    let _guard = state.wifi.settings.lock().await;
     let mut row = load(&state.db).await?;
     if let Some(url) = &change.router_url {
         row.router_url = normalize_router_url(url)
@@ -168,42 +158,36 @@ pub async fn change_settings(state: &AppState, change: SettingsChange) -> Result
         }
         row.router_password = (!password.is_empty()).then_some(password);
     }
-    let left = row.remaining_at(now);
     if let Some(enabled) = change.enabled {
         row.enabled = enabled;
     }
     if row.enabled && !row.password_set() {
         return Err(SettingsError::Invalid("Save the router password first.".into()));
     }
-    sqlx::query(
-        "UPDATE wifi SET enabled = ?, remaining_seconds = ?, counted_at = ?, router_url = ?, router_user = ?,
-         router_password = ? WHERE id = 1",
-    )
-    .bind(row.enabled)
-    .bind(left)
-    .bind(now.to_rfc3339())
-    .bind(&row.router_url)
-    .bind(&row.router_user)
-    .bind(&row.router_password)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE wifi SET enabled = ?, router_url = ?, router_user = ?, router_password = ? WHERE id = 1")
+        .bind(row.enabled)
+        .bind(&row.router_url)
+        .bind(&row.router_user)
+        .bind(&row.router_password)
+        .execute(&state.db)
+        .await?;
     drop(_guard);
     tracing::info!(enabled = row.enabled, router = %row.router_url, "Wi-Fi settings changed");
-    state.wifi.poke(true);
+    state.wifi.retry_now.store(true, Ordering::SeqCst);
+    state.wifi.poke();
     Ok(())
 }
 
-/// Everything the UI shows about Wi-Fi time. Never includes the router password.
+/// The router side of Wi-Fi time, for the UI. Never includes the router password.
 #[derive(Debug, Clone, Serialize)]
 pub struct Overview {
-    /// Wi-Fi time is being enforced.
+    /// The built-in user's username, for its schedule, time and history.
+    pub username: &'static str,
+    /// Wi-Fi time switches the router.
     pub enabled: bool,
     pub password_set: bool,
     pub router_url: String,
     pub router_user: String,
-    pub remaining_seconds: i64,
-    /// Rounded up, so "1 min" shows until it's really gone.
-    pub remaining_minutes: i64,
     /// What the router should be set to; `None` when the server leaves it alone.
     pub wanted_on: Option<bool>,
     pub router: RouterStatus,
@@ -212,27 +196,26 @@ pub struct Overview {
 pub async fn overview(state: &AppState) -> Result<Overview> {
     let row = load(&state.db).await?;
     let router = state.wifi.router_status().await;
-    let remaining = row.remaining_at(Utc::now());
+    let allowed = matches!(decision(&state.db).await?, Decision::Allowed { .. });
     Ok(Overview {
+        username: USER,
         enabled: row.enabled,
         password_set: row.password_set(),
-        wanted_on: wanted(&row, remaining, router.on),
+        wanted_on: wanted(&row, allowed, router.on),
         router_url: row.router_url,
         router_user: row.router_user,
-        remaining_seconds: remaining,
-        remaining_minutes: (remaining + 59) / 60,
         router,
     })
 }
 
-/// What the router should be: on while there's time, off at zero. When Wi-Fi time is turned
-/// off, the server's last word was "off" gets undone; otherwise it leaves the router alone.
-fn wanted(row: &Row, remaining: i64, router_on: Option<bool>) -> Option<bool> {
+/// What the router should be: on while the Wi-Fi user is allowed, off otherwise. When Wi-Fi
+/// time is turned off, the server's own "off" gets undone; otherwise it leaves the router alone.
+fn wanted(row: &Row, allowed: bool, router_on: Option<bool>) -> Option<bool> {
     if !row.password_set() {
         return None;
     }
     if row.enabled {
-        Some(remaining > 0)
+        Some(allowed)
     } else if router_on == Some(false) {
         Some(true)
     } else {
@@ -240,20 +223,47 @@ fn wanted(row: &Row, remaining: i64, router_on: Option<bool>) -> Option<bool> {
     }
 }
 
-/// Keep the router in line with the balance. Runs for the life of the server: once at start,
-/// then whenever time or settings change, every TICK, and the moment the balance runs out.
+/// Keep the router in line with the schedule, and count the minutes the Wi-Fi is on. Runs for
+/// the life of the server: once at start, then whenever something changes, and every TICK.
 pub async fn run(state: AppState) {
     let mut retry_at: Option<Instant> = None;
+    let mut last = Instant::now();
+    // Time on not yet recorded as a whole minute.
+    let mut unrecorded = Duration::ZERO;
     loop {
         if state.wifi.retry_now.swap(false, Ordering::SeqCst) {
             retry_at = None;
         }
+        let now = Instant::now();
+        let elapsed = now - last;
+        last = now;
         let mut sleep_for = TICK;
         match load(&state.db).await {
             Ok(row) => {
-                let remaining = row.remaining_at(Utc::now());
                 let current = state.wifi.router.lock().await.on;
-                if let Some(on) = wanted(&row, remaining, current)
+                // Minutes count while Wi-Fi time is on and the Wi-Fi is on.
+                if row.enabled && row.password_set() && current == Some(true) {
+                    unrecorded += elapsed;
+                    let minutes = (unrecorded.as_secs() / 60) as u32;
+                    if minutes > 0 {
+                        unrecorded -= Duration::from_secs(minutes as u64 * 60);
+                        if let Err(e) = record_use(&state.db, minutes).await {
+                            tracing::warn!("recording Wi-Fi use failed: {e:#}");
+                        }
+                    }
+                    sleep_for = sleep_for.min(Duration::from_secs(60) - unrecorded);
+                } else {
+                    unrecorded = Duration::ZERO;
+                }
+                let allowed = match decision(&state.db).await {
+                    Ok(d) => matches!(d, Decision::Allowed { .. }),
+                    Err(e) => {
+                        tracing::warn!("checking the Wi-Fi schedule failed: {e:#}");
+                        // Leave the router as it is.
+                        current.unwrap_or(true)
+                    }
+                };
+                if let Some(on) = wanted(&row, allowed, current)
                     && current != Some(on)
                     && retry_at.is_none_or(|t| Instant::now() >= t)
                 {
@@ -285,19 +295,15 @@ pub async fn run(state: AppState) {
                     }
                     continue;
                 }
-                // Wake right when the time runs out.
-                if row.enabled && remaining > 0 {
-                    sleep_for = sleep_for.min(Duration::from_secs(remaining as u64));
-                }
             }
-            Err(e) => tracing::warn!("reading Wi-Fi time failed: {e:#}"),
+            Err(e) => tracing::warn!("reading Wi-Fi settings failed: {e:#}"),
         }
         if let Some(t) = retry_at {
             sleep_for = sleep_for.min(t.saturating_duration_since(Instant::now()).max(Duration::from_secs(1)));
         }
         tokio::select! {
             _ = state.wifi.wake.notified() => {}
-            _ = tokio::time::sleep(sleep_for) => {}
+            _ = tokio::time::sleep(sleep_for.max(Duration::from_millis(100))) => {}
         }
     }
 }
@@ -639,27 +645,21 @@ mod tests {
     }
 
     #[test]
-    fn balance_runs_down_only_while_enabled() {
-        let t0: DateTime<Utc> = "2026-11-11T10:00:00Z".parse().unwrap();
+    fn wanted_follows_the_schedule_only_when_turned_on() {
         let mut row = Row {
             enabled: true,
-            remaining_seconds: 600,
-            counted_at: t0.to_rfc3339(),
             router_url: "http://192.168.1.1".into(),
             router_user: "admin".into(),
             router_password: Some("x".into()),
         };
-        assert_eq!(row.remaining_at(t0 + chrono::Duration::seconds(90)), 510);
-        assert_eq!(row.remaining_at(t0 + chrono::Duration::hours(2)), 0);
-        assert_eq!(wanted(&row, 0, Some(true)), Some(false));
-        assert_eq!(wanted(&row, 5, None), Some(true));
+        assert_eq!(wanted(&row, false, Some(true)), Some(false));
+        assert_eq!(wanted(&row, true, None), Some(true));
         row.enabled = false;
-        assert_eq!(row.remaining_at(t0 + chrono::Duration::hours(2)), 600);
         // Turned off: undo our own "off", otherwise leave the router alone.
-        assert_eq!(wanted(&row, 600, Some(false)), Some(true));
-        assert_eq!(wanted(&row, 600, None), None);
+        assert_eq!(wanted(&row, false, Some(false)), Some(true));
+        assert_eq!(wanted(&row, false, None), None);
         row.router_password = None;
         row.enabled = true;
-        assert_eq!(wanted(&row, 0, Some(true)), None);
+        assert_eq!(wanted(&row, false, Some(true)), None);
     }
 }

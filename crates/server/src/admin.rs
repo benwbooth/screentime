@@ -44,7 +44,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/test", post(push_test))
         .route("/api/wifi", get(wifi))
-        .route("/api/wifi/time", post(wifi_time))
         .route("/api/wifi/settings", put(wifi_settings))
 }
 
@@ -138,6 +137,8 @@ async fn logout(State(s): State<AppState>, headers: HeaderMap) -> AppResult<Resp
 #[derive(Serialize)]
 pub struct UserOverview {
     pub username: String,
+    /// The built-in Wi-Fi user rather than a kid.
+    pub wifi: bool,
     /// What to call them in the UI; the username if no name was set.
     pub name: String,
     /// Monday first. `null` means no limit that day.
@@ -161,6 +162,7 @@ async fn user_overview(s: &AppState, id: i64, username: String, today: NaiveDate
     // An empty host means every machine's usage counts against the allowance.
     let policy = db::policy_for(&s.db, id, &username, "", today).await?;
     Ok(UserOverview {
+        wifi: username == crate::wifi::USER,
         name: db::display_name(&s.db, id).await?.unwrap_or_else(|| username.clone()),
         decision: evaluate(Some(&policy), Local::now().naive_local(), 0),
         allowances: db::allowances(&s.db, id).await?,
@@ -231,6 +233,7 @@ async fn set_allowances(
     }
     let id = find_user(&s, &username).await?;
     db::set_allowances(&s.db, id, &allowances).await?;
+    s.wifi.poke();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -245,6 +248,7 @@ async fn set_downtime(
     }
     let id = find_user(&s, &username).await?;
     db::set_downtime(&s.db, id, &windows).await?;
+    s.wifi.poke();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -281,6 +285,7 @@ async fn add_bonus(
         db::add_bonus(&s.db, id, today, minutes, "web").await?;
     }
     tracing::info!(user = %username, asked = body.minutes, minutes, "time adjusted from web");
+    s.wifi.poke();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -304,6 +309,7 @@ async fn set_lock(
         None => "*".to_owned(),
     };
     db::set_lock(&s.db, id, &host, body.locked).await?;
+    s.wifi.poke();
     tracing::info!(user = %username, computer = %host, locked = body.locked, "lock changed from web");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -422,6 +428,7 @@ async fn set_account(
     Json(body): Json<AccountKid>,
 ) -> AppResult<StatusCode> {
     let kid = match &body.kid {
+        Some(k) if k == crate::wifi::USER => return Err(AppError::BadRequest("Wi-Fi isn't a kid".into())),
         Some(k) => Some(find_user(&s, k).await?),
         None => None,
     };
@@ -465,6 +472,7 @@ struct HistoryQuery {
 #[derive(Serialize)]
 struct KidHistory {
     username: String,
+    wifi: bool,
     name: String,
     days: Vec<db::DayHistory>,
 }
@@ -480,6 +488,7 @@ async fn history(
     let mut out = Vec::new();
     for (id, username) in db::usernames(&s.db).await? {
         out.push(KidHistory {
+            wifi: username == crate::wifi::USER,
             name: db::display_name(&s.db, id).await?.unwrap_or_else(|| username.clone()),
             days: db::history(&s.db, id, today, days).await?,
             username,
@@ -489,15 +498,6 @@ async fn history(
 }
 
 async fn wifi(State(s): State<AppState>, _: Admin) -> AppResult<Json<crate::wifi::Overview>> {
-    Ok(Json(crate::wifi::overview(&s).await?))
-}
-
-/// Add (positive) or take away (negative) Wi-Fi minutes. Never goes below zero.
-async fn wifi_time(State(s): State<AppState>, _: Admin, Json(body): Json<Adjustment>) -> AppResult<Json<crate::wifi::Overview>> {
-    if body.minutes == 0 || body.minutes.abs() > 24 * 60 {
-        return Err(AppError::BadRequest("between 1 minute and 24 hours".into()));
-    }
-    crate::wifi::adjust(&s, body.minutes).await?;
     Ok(Json(crate::wifi::overview(&s).await?))
 }
 

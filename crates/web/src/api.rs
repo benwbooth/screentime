@@ -17,6 +17,9 @@ pub struct HostUsage {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct UserOverview {
     pub username: String,
+    /// The built-in Wi-Fi user rather than a kid.
+    #[serde(default)]
+    pub wifi: bool,
     #[serde(default)]
     pub time_left: Option<u32>,
     pub name: String,
@@ -76,15 +79,15 @@ pub struct RouterStatus {
     pub last_error_at: Option<String>,
 }
 
-/// The household's Wi-Fi time. The router password itself never comes back, only whether it's set.
+/// The router side of Wi-Fi time; its schedule, time and history belong to the built-in Wi-Fi
+/// user. The router password itself never comes back, only whether it's set.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Wifi {
+    pub username: String,
     pub enabled: bool,
     pub password_set: bool,
     pub router_url: String,
     pub router_user: String,
-    pub remaining_seconds: i64,
-    pub remaining_minutes: i64,
     pub wanted_on: Option<bool>,
     pub router: RouterStatus,
 }
@@ -184,6 +187,8 @@ pub struct PlaySession {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct KidHistory {
     pub username: String,
+    #[serde(default)]
+    pub wifi: bool,
     pub name: String,
     pub days: Vec<DayHistory>,
 }
@@ -268,11 +273,6 @@ pub async fn push_test() -> ApiResult<usize> {
     }
     let d: Delivered = json(send("POST", "/api/push/test", &serde_json::json!({})).await?).await?;
     Ok(d.delivered)
-}
-
-/// Positive adds Wi-Fi time, negative takes it away.
-pub async fn add_wifi_time(minutes: i64) -> ApiResult<()> {
-    send("POST", "/api/wifi/time", &serde_json::json!({ "minutes": minutes })).await.map(drop)
 }
 
 /// Change Wi-Fi settings; fields left `None` keep their saved values.

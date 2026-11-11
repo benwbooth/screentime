@@ -120,7 +120,9 @@ label { font-weight: 600; font-size: 0.9rem; }
 .switch { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; width: 104px; }
 .switch input { min-height: 0; width: 18px; height: 18px; accent-color: var(--accent); }
 .switch.wide { width: auto; margin-top: 6px; }
-.wifi .avatar svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.wifi-icon { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.name-input.hidden { display: none; }
+.name-fixed { font-size: 1.05rem; }
 .wifi .error { margin: 0 0 12px; }
 .picker.spaced { margin-top: 14px; }
 .minutes { width: 88px; }

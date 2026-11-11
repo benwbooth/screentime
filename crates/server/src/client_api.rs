@@ -24,6 +24,8 @@ pub fn valid_username(name: &str) -> bool {
     matches!(chars.next(), Some('a'..='z' | '_'))
         && name.len() <= 32
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
+        // Taken by the built-in Wi-Fi user.
+        && name != crate::wifi::USER
 }
 
 fn check_username(name: &str) -> AppResult<()> {

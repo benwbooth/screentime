@@ -429,9 +429,16 @@ fn MinutePicker(
 fn TodayView() -> impl IntoView {
     let ctx = ctx();
     let requests = move || ctx.overview.with(|o| o.as_ref().map(|o| o.pending_requests.clone()).unwrap_or_default());
-    let users = move || ctx.overview.with(|o| o.as_ref().map(|o| o.users.clone()).unwrap_or_default());
+    let users = move || {
+        ctx.overview.with(|o| o.as_ref().map(|o| o.users.iter().filter(|u| !u.wifi).cloned().collect::<Vec<_>>()).unwrap_or_default())
+    };
     let today = move || ctx.overview.with(|o| o.as_ref().map(|o| o.today)).unwrap_or_default();
-    let wifi = move || ctx.overview.with(|o| o.as_ref().and_then(|o| o.wifi.clone()));
+    let wifi = move || {
+        ctx.overview.with(|o| {
+            let o = o.as_ref()?;
+            Some((o.users.iter().find(|u| u.wifi)?.clone(), o.wifi.clone()?))
+        })
+    };
     view! {
         <header class="page-head"><h1>"Today"</h1></header>
         <Show when=move || !requests().is_empty()>
@@ -445,121 +452,34 @@ fn TodayView() -> impl IntoView {
             </section>
         </Show>
         <section>
-            <h2>"Kids"</h2>
-            <Show when=move || !users().is_empty()
-                fallback=|| view! { <p class="empty">"No one yet. Kids appear here once a computer checks in for them, or add one under Schedules."</p> }>
-                <div class="grid">
-                    <For each=users key=|u| format!("{u:?}") let:u>
-                        <KidCard u=u today=today()/>
-                    </For>
-                </div>
+            <h2>"Kids and Wi-Fi"</h2>
+            <div class="grid">
+                <For each=users key=|u| format!("{u:?}") let:u>
+                    <KidCard u=u today=today()/>
+                </For>
+                {move || wifi().map(|(u, w)| view! { <KidCard u=u today=today() wifi=w/> })}
+            </div>
+            <Show when=move || users().is_empty()>
+                <p class="empty">"No kids yet. Kids appear here once a computer checks in for them, or add one under Schedules."</p>
             </Show>
         </section>
-        {move || wifi().map(|w| view! {
-            <section>
-                <h2>"Wi-Fi"</h2>
-                <div class="grid"><WifiCard w=w/></div>
-            </section>
-        })}
     }
 }
 
 const WIFI_ICON: &str = "M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01";
 
 /// Ask before a change that would turn the Wi-Fi off right now.
-fn confirm_wifi_off(w: &Wifi, enabling: bool) -> bool {
-    !(enabling && w.remaining_seconds == 0)
-        || confirm_action("There's no Wi-Fi time left, so this turns the Wi-Fi off now. Go ahead?")
+fn confirm_wifi_off(ctx: Ctx, enabling: bool) -> bool {
+    let allowed = ctx.overview.with_untracked(|o| {
+        o.as_ref().and_then(|o| o.users.iter().find(|u| u.wifi)).is_none_or(|u| matches!(u.decision, Decision::Allowed { .. }))
+    });
+    !enabling || allowed || confirm_action("Wi-Fi is out of time or in downtime, so this turns the Wi-Fi off now. Go ahead?")
 }
 
-/// The household's Wi-Fi time, styled like a kid's card.
+/// The Wi-Fi's avatar.
 #[component]
-fn WifiCard(w: Wifi) -> impl IntoView {
-    let ctx = ctx();
-    let left = if w.remaining_minutes <= 0 {
-        "No Wi-Fi time left".to_string()
-    } else {
-        format!("{} left", fmt_minutes(w.remaining_minutes as u32))
-    };
-    let tone = match (w.enabled, w.remaining_minutes) {
-        (false, _) => "",
-        (true, 0) => "off",
-        (true, m) if m <= 10 => "warn",
-        _ => "ok",
-    };
-    let state = match w.router.on {
-        Some(true) => Some("Wi-Fi is on".to_string()),
-        Some(false) => Some("Wi-Fi is off".to_string()),
-        None if w.enabled && w.router.last_error.is_some() => Some("Wi-Fi state unknown".to_string()),
-        None if w.enabled => Some("Checking the router\u{2026}".to_string()),
-        None => None,
-    };
-    let switching = match (w.wanted_on, w.router.on) {
-        (Some(want), now) if now != Some(want) && now.is_some() && w.router.last_error.is_none() => {
-            Some(format!("Turning Wi-Fi {}\u{2026}", if want { "on" } else { "off" }))
-        }
-        _ => None,
-    };
-    let setup = if !w.password_set {
-        Some("Not set up: add the router password under Account".to_string())
-    } else if !w.enabled {
-        Some("Paused: not counting down or switching the Wi-Fi".to_string())
-    } else {
-        None
-    };
-    let details = [state, switching, setup];
-    let error = w.router.last_error.clone().map(|e| {
-        let when = w.router.last_error_at.as_deref().map(local_time).unwrap_or_default();
-        format!("Router: {e} ({when})")
-    });
-    let adjust = move |minutes: i64| {
-        let done = if minutes > 0 { format!("Added {minutes} minutes of Wi-Fi") } else { "Took Wi-Fi time away".to_string() };
-        ctx.act(done, api::add_wifi_time(minutes))
-    };
-    let add = Callback::new(move |m: u32| adjust(m as i64));
-    let take = Callback::new(move |m: u32| adjust(-(m as i64)));
-    let toggle = {
-        let w = w.clone();
-        move |_| {
-            let enabling = !w.enabled;
-            if !confirm_wifi_off(&w, enabling) {
-                return;
-            }
-            let done = if enabling { "Wi-Fi time is on" } else { "Wi-Fi time is paused" };
-            ctx.act(done, api::set_wifi(Some(enabling), None, None, None))
-        }
-    };
-    view! {
-        <article class="card kid wifi">
-            <div class="kid-head">
-                <span class="avatar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d=WIFI_ICON/></svg></span>
-                <div>
-                    <strong>"Everyone"</strong>
-                    <div class=format!("status big {tone}")>{left}</div>
-                </div>
-            </div>
-            <ul class="facts">{details.into_iter().flatten().map(|d| view! { <li>{d}</li> }).collect_view()}</ul>
-            {error.map(|e| view! { <p class="error small">{e}</p> })}
-            <div class="label">"Add Wi-Fi time"</div>
-            <MinutePicker on_pick=add/>
-            <div class="label spaced">"Take Wi-Fi time away"</div>
-            <MinutePicker on_pick=take minus=true/>
-            {w.password_set.then(|| view! {
-                <div class="label spaced">"Wi-Fi time"</div>
-                <div class="picker">
-                    <button class="chip" class:suggested=!w.enabled on:click=toggle>
-                        {if w.enabled { "Pause Wi-Fi time" } else { "Start Wi-Fi time" }}
-                    </button>
-                    <button class="chip" on:click=move |_| ctx.tab.set(Tab::Account)>"Router settings"</button>
-                </div>
-            })}
-            {(!w.password_set).then(|| view! {
-                <div class="picker spaced">
-                    <button class="chip" on:click=move |_| ctx.tab.set(Tab::Account)>"Set up the router"</button>
-                </div>
-            })}
-        </article>
-    }
+fn WifiIcon() -> impl IntoView {
+    view! { <svg class="wifi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d=WIFI_ICON/></svg> }
 }
 
 fn kid_name(ctx: Ctx, username: &str) -> String {
@@ -596,8 +516,15 @@ fn RequestCard(r: RequestRow) -> impl IntoView {
 }
 
 #[component]
-fn KidCard(u: UserOverview, today: chrono::NaiveDate) -> impl IntoView {
+fn KidCard(
+    u: UserOverview,
+    today: chrono::NaiveDate,
+    /// Set for the built-in Wi-Fi user: what the router is doing.
+    #[prop(optional)]
+    wifi: Option<Wifi>,
+) -> impl IntoView {
     let ctx = ctx();
+    let is_wifi = wifi.is_some();
     let (headline, _) = status(&u, today);
     let (username, shown) = (u.username.clone(), u.name.clone());
     let adjust = {
@@ -633,11 +560,69 @@ fn KidCard(u: UserOverview, today: chrono::NaiveDate) -> impl IntoView {
         Decision::Denied { .. } => Some(headline.clone()),
         Decision::Allowed { .. } => None,
     };
-    let details = [
+    let used = if wifi.is_some() {
+        format!("On for {} today", fmt_minutes(u.used_today))
+    } else {
+        format!("Used {} today", fmt_minutes(u.used_today))
+    };
+    let mut details = vec![
         blocked,
-        (!u.locks.is_empty() && !u.locks.iter().any(|l| l == "*")).then(|| format!("Locked on {}", u.locks.join(", "))),
-        Some(format!("Used {} today", fmt_minutes(u.used_today))),
+        (wifi.is_none() && !u.locks.is_empty() && !u.locks.iter().any(|l| l == "*"))
+            .then(|| format!("Locked on {}", u.locks.join(", "))),
+        Some(used),
     ];
+    let mut router_error = None;
+    if let Some(w) = &wifi {
+        details.push(match w.router.on {
+            Some(true) => Some("Wi-Fi is on".to_string()),
+            Some(false) => Some("Wi-Fi is off".to_string()),
+            None if w.enabled && w.router.last_error.is_some() => Some("Wi-Fi state unknown".to_string()),
+            None if w.enabled => Some("Checking the router\u{2026}".to_string()),
+            None => None,
+        });
+        details.push(match (w.wanted_on, w.router.on) {
+            (Some(want), Some(now)) if now != want && w.router.last_error.is_none() => {
+                Some(format!("Turning Wi-Fi {}\u{2026}", if want { "on" } else { "off" }))
+            }
+            _ => None,
+        });
+        details.push(if !w.password_set {
+            Some("Not switching the router yet: set it up under Account".to_string())
+        } else if !w.enabled {
+            Some("Paused: not switching the Wi-Fi".to_string())
+        } else {
+            None
+        });
+        router_error = w.router.last_error.clone().map(|e| {
+            let when = w.router.last_error_at.as_deref().map(local_time).unwrap_or_default();
+            format!("Router: {e} ({when})")
+        });
+    }
+    let wifi_controls = wifi.map(|w| {
+        let enabled = w.enabled;
+        let toggle = move |_| {
+            let enabling = !enabled;
+            if !confirm_wifi_off(ctx, enabling) {
+                return;
+            }
+            let done = if enabling { "Wi-Fi time is on" } else { "Wi-Fi time is paused" };
+            ctx.act(done, api::set_wifi(Some(enabling), None, None, None))
+        };
+        view! {
+            <div class="label spaced">"Router"</div>
+            <div class="picker">
+                {w.password_set.then(|| view! {
+                    <button class="chip" class:suggested=!enabled on:click=toggle>
+                        {if enabled { "Pause Wi-Fi time" } else { "Start Wi-Fi time" }}
+                    </button>
+                })}
+                <button class="chip" class:suggested=!w.password_set on:click=move |_| ctx.tab.set(Tab::Account)>
+                    {if w.password_set { "Router settings" } else { "Set up the router" }}
+                </button>
+                <button class="chip" on:click=move |_| ctx.tab.set(Tab::Schedules)>"Schedule"</button>
+            </div>
+        }
+    });
     let locked_all = u.locks.iter().any(|l| l == "*");
     let locked_on = u.locks.clone();
     let computers = move || ctx.overview.with(|o| o.as_ref().map(|o| o.clients.clone()).unwrap_or_default());
@@ -645,22 +630,27 @@ fn KidCard(u: UserOverview, today: chrono::NaiveDate) -> impl IntoView {
         let (username, shown) = (username.clone(), shown.clone());
         move |computer: Option<String>, locked: bool| {
             let (username, shown) = (username.clone(), shown.clone());
-            let where_ = computer.clone().unwrap_or_else(|| "all computers".into());
+            let where_ = computer.clone().unwrap_or_else(|| if is_wifi { "the router".into() } else { "all computers".into() });
             let done = if locked { format!("Locked {shown} on {where_}") } else { format!("Unlocked {shown} on {where_}") };
             ctx.act(done, async move { api::set_lock(&username, computer.as_deref(), locked).await })
         }
     };
     let lock_all = lock.clone();
     view! {
-        <article class="card kid">
+        <article class="card kid" class:wifi=is_wifi>
             <div class="kid-head">
-                <span class="avatar">{u.name.chars().next().unwrap_or('?').to_uppercase().to_string()}</span>
+                <span class="avatar">{if is_wifi {
+                    view! { <WifiIcon/> }.into_any()
+                } else {
+                    u.name.chars().next().unwrap_or('?').to_uppercase().to_string().into_any()
+                }}</span>
                 <div>
                     <strong>{u.name.clone()}</strong>
                     <div class=format!("status big {left_tone}")>{left}</div>
                 </div>
             </div>
             <ul class="facts">{details.into_iter().flatten().map(|d| view! { <li>{d}</li> }).collect_view()}</ul>
+            {router_error.map(|e| view! { <p class="error small">{e}</p> })}
             <div class="label">"Add time"</div>
             <MinutePicker on_pick=add/>
             <div class="label spaced">"Take time away"</div>
@@ -669,9 +659,14 @@ fn KidCard(u: UserOverview, today: chrono::NaiveDate) -> impl IntoView {
             <div class="picker">
                 <button class="chip lock" class:active=locked_all
                     on:click=move |_| lock_all(None, !locked_all)>
-                    {if locked_all { "Unlock all" } else { "Lock all computers" }}
+                    {match (is_wifi, locked_all) {
+                        (true, true) => "Unlock Wi-Fi",
+                        (true, false) => "Lock Wi-Fi off",
+                        (false, true) => "Unlock all",
+                        (false, false) => "Lock all computers",
+                    }}
                 </button>
-                {move || (!locked_all).then(|| {
+                {move || (!locked_all && !is_wifi).then(|| {
                     let lock = lock.clone();
                     let locked_on = locked_on.clone();
                     computers().into_iter().map(move |c| {
@@ -687,6 +682,7 @@ fn KidCard(u: UserOverview, today: chrono::NaiveDate) -> impl IntoView {
                     }).collect_view()
                 })}
             </div>
+            {wifi_controls}
         </article>
     }
 }
@@ -1162,8 +1158,13 @@ fn ScheduleEditor(u: UserOverview) -> impl IntoView {
     view! {
         <article class="card schedule">
             <div class="kid-head">
-                <span class="avatar">{u.name.chars().next().unwrap_or('?').to_uppercase().to_string()}</span>
-                <input class="name-input" aria-label="Name" prop:value=u.name.clone() on:change={
+                <span class="avatar">{if u.wifi {
+                    view! { <WifiIcon/> }.into_any()
+                } else {
+                    u.name.chars().next().unwrap_or('?').to_uppercase().to_string().into_any()
+                }}</span>
+                {u.wifi.then(|| view! { <strong class="name-fixed">"Wi-Fi"</strong> })}
+                <input class="name-input" class:hidden=u.wifi aria-label="Name" prop:value=u.name.clone() on:change={
                     let username = name.clone();
                     move |ev| {
                         let (username, shown) = (username.clone(), event_target_value(&ev));
@@ -1172,9 +1173,14 @@ fn ScheduleEditor(u: UserOverview) -> impl IntoView {
                 }/>
             </div>
             <h3>"Daily limit"</h3>
+            {u.wifi.then(|| view! { <p class="muted small">"Minutes of Wi-Fi a day. When they run out the Wi-Fi turns off until you add time or the next day starts."</p> })}
             <div class="limits">{limit_rows}</div>
             <h3>"Downtime"</h3>
-            <p class="muted small">"Can't sign in during these times. A window that ends earlier than it starts runs overnight."</p>
+            <p class="muted small">{if u.wifi {
+                "The Wi-Fi is off during these times. A window that ends earlier than it starts runs overnight."
+            } else {
+                "Can't sign in during these times. A window that ends earlier than it starts runs overnight."
+            }}</p>
             <div class="stack">
                 <For each=windows key=|(i, w)| format!("{i}{w:?}") let:item>
                     <DowntimeRow index=item.0 w=item.1 downtime=downtime dirty=dirty/>
@@ -1246,7 +1252,9 @@ fn DowntimeRow(index: usize, w: DowntimeWindow, downtime: RwSignal<Vec<DowntimeW
 #[component]
 fn AccountRowView(host: String, a: api::AccountRow) -> impl IntoView {
     let ctx = ctx();
-    let kids = move || ctx.overview.with(|o| o.as_ref().map(|o| o.users.clone()).unwrap_or_default());
+    let kids = move || {
+        ctx.overview.with(|o| o.as_ref().map(|o| o.users.iter().filter(|u| !u.wifi).cloned().collect::<Vec<_>>()).unwrap_or_default())
+    };
     if a.admin {
         return view! {
             <div class="account">
@@ -1563,7 +1571,7 @@ fn WifiSettings() -> impl IntoView {
             error.set(Some("Enter the router password first.".into()));
             return;
         }
-        if enabling && !w.enabled && !confirm_wifi_off(&w, true) {
+        if enabling && !w.enabled && !confirm_wifi_off(ctx, true) {
             return;
         }
         error.set(None);
@@ -1599,7 +1607,7 @@ fn WifiSettings() -> impl IntoView {
     view! {
         <form class="card form" on:submit=save autocomplete="off">
             <h3>"Wi-Fi router"</h3>
-            <p class="muted small">"Wi-Fi time turns the router's 2.4 GHz and 5 GHz Wi-Fi off when it runs out, and back on when you add time. Netgear Nighthawk RS200."</p>
+            <p class="muted small">"Wi-Fi has a schedule and time like a kid (see Today, Schedules and History). With this on, the server turns the router's 2.4 GHz and 5 GHz Wi-Fi off when Wi-Fi is out of time, in downtime or locked, and back on when it's allowed. Netgear Nighthawk RS200."</p>
             <label for="router-url">"Router address"</label>
             <input id="router-url" type="text" inputmode="url" required autocomplete="off" spellcheck="false"
                 prop:value=move || url.get() on:input=move |ev| url.set(event_target_value(&ev))/>
@@ -1614,7 +1622,7 @@ fn WifiSettings() -> impl IntoView {
             <label class="switch wide">
                 <input type="checkbox" prop:checked=move || enabled.get()
                     on:change=move |ev| enabled.set(event_target_checked(&ev))/>
-                <span>"Use Wi-Fi time (turn the Wi-Fi off when it runs out)"</span>
+                <span>"Switch the Wi-Fi by its schedule and time"</span>
             </label>
             {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
             <div class="row">

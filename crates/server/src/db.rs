@@ -55,7 +55,7 @@ pub async fn ensure_user(db: &SqlitePool, username: &str, default_minutes: u32) 
 }
 
 pub async fn usernames(db: &SqlitePool) -> Result<Vec<(i64, String)>> {
-    Ok(sqlx::query_as("SELECT id, username FROM users ORDER BY username").fetch_all(db).await?)
+    Ok(sqlx::query_as("SELECT id, username FROM users ORDER BY username = 'wifi', username").fetch_all(db).await?)
 }
 
 pub async fn allowances(db: &SqlitePool, user: i64) -> Result<Allowances> {

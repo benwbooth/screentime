@@ -91,8 +91,8 @@ services.screentime.client = {
   page offering 0/15/30/45/60/custom. ntfy is optional.
 - **Web UI:** working. Leptos, phone layout (bottom tabs) and desktop layout (sidebar): today's
   status and requests, add time, per-day limits and downtime, computers, notifications.
-- **Wi-Fi time:** working. One household balance that counts down while it's on; at zero the
-  server turns the Netgear router's Wi-Fi off, and adding time turns it back on.
+- **Wi-Fi time:** working. Wi-Fi is a built-in user with a schedule, added time, a lock and
+  history; when it isn't allowed, the server turns the Netgear router's Wi-Fi off.
 - **Greeter, warning overlay:** not started.
 
 ## Setting up the server
@@ -171,22 +171,23 @@ services.screentime.server = {
 
 ### Wi-Fi time
 
-A single Wi-Fi balance for the whole house, on the Today page next to the kids. Add or take
-away minutes like a kid's time. While Wi-Fi time is on, the balance runs down in real time; when
-it reaches zero the server switches the router's main 2.4 GHz and 5 GHz radios off (the 6 GHz
-radio is left alone), and adding time switches them back on. Pausing Wi-Fi time stops the
-countdown and, if the server had switched the Wi-Fi off, turns it back on.
+Wi-Fi is a built-in user, "Wi-Fi", with everything a kid has: a daily limit and downtime under
+Schedules, time added or taken away and a lock on the Today page, and its own History. It
+starts with no limit. Its minutes count while the Wi-Fi is on. When it's out of time, in
+downtime or locked, the server switches the router's main 2.4 GHz and 5 GHz radios off (the
+6 GHz radio is left alone), and back on when it's allowed again. Pausing Wi-Fi time stops the
+switching and, if the server had switched the Wi-Fi off, turns it back on.
 
 It drives a Netgear Nighthawk RS200 through its web admin pages (log in, read the Advanced
 Wireless page's one-time token, post the form, log out). The router allows one admin session at a
 time, so the server only logs in when the Wi-Fi needs to change: once at start, then when the
-balance or settings change. Failures are retried every minute (every 15 minutes after a refused
-login, to avoid the router's lockout) and shown on the Wi-Fi card.
+schedule says so. Failures are retried every minute (every 15 minutes after a refused login, to
+avoid the router's lockout) and shown on the Wi-Fi card.
 
 Set it up under Account → Wi-Fi router: the router's address (default `http://192.168.1.1`),
-username (`admin`) and password, then tick "Use Wi-Fi time". Nothing touches the router until
-then. The password is stored in the server's database (with the rest of its data, never in this
-repository) and is never sent back to the browser; the page only shows whether one is saved.
-The server has to reach the router on the LAN.
+username (`admin`) and password, then tick "Switch the Wi-Fi by its schedule and time". Nothing
+touches the router until then. The password is stored in the server's database (with the rest
+of its data, never in this repository) and is never sent back to the browser; the page only
+shows whether one is saved. The server has to reach the router on the LAN.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the anti-bypass and warning design.
