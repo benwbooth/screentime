@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build and install the screentime client on a Mac, from a checkout of the repository.
+# Install the screentime client on a Mac: from a release download (screentime-macos.zip, apps
+# already built) or from a checkout of the repository (builds with crates/macos/build.sh).
 #
 #   crates/macos/install.sh --server https://benwbooth-nixos.duckdns.org:8443 --token TOKEN --users bbooth=adrian
 #
@@ -52,47 +53,18 @@ if [ -z "$server" ] || [ -z "$token" ] || [ -z "$users" ]; then
   exit 2
 fi
 
-echo "Building..."
-run_as_builder() { if [ "$system" = 1 ] && [ "$build_user" != root ]; then sudo -u "$build_user" -H "$@"; else "$@"; fi; }
-cargo="$(run_as_builder bash -lc 'command -v cargo || echo ~/.cargo/bin/cargo')"
-run_as_builder "$cargo" build --release --manifest-path "$root/Cargo.toml" -p screentime-macos
-out="$root/target/macos-dist"
-run_as_builder mkdir -p "$out/ScreenTimeMenu.app/Contents/MacOS"
-run_as_builder swiftc -O -o "$out/ScreenTimeMenu.app/Contents/MacOS/ScreenTimeMenu" \
-  "$root/crates/macos/menubar/ScreenTimeMenu.swift" -framework AppKit
-run_as_builder tee "$out/ScreenTimeMenu.app/Contents/Info.plist" >/dev/null <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>$label_menu</string>
-  <key>CFBundleName</key><string>Screen time</string>
-  <key>CFBundleExecutable</key><string>ScreenTimeMenu</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>LSUIElement</key><true/>
-</dict></plist>
-EOF
-run_as_builder codesign --force -s - "$out/ScreenTimeMenu.app"
-# The agent goes in an app bundle too: macOS only lets an app with a bundle identity and a
-# reason ask for Local Network access, and without it the server on the LAN is "no route to host".
-agent_app="$out/ScreenTimeAgent.app"
-run_as_builder mkdir -p "$agent_app/Contents/MacOS"
-run_as_builder cp -f "$root/target/release/screentime-mac" "$agent_app/Contents/MacOS/"
-run_as_builder tee "$agent_app/Contents/Info.plist" >/dev/null <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>$label_agent</string>
-  <key>CFBundleName</key><string>Screen time</string>
-  <key>CFBundleExecutable</key><string>screentime-mac</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>LSUIElement</key><true/>
-  <key>LSBackgroundOnly</key><true/>
-  <key>NSLocalNetworkUsageDescription</key><string>Screen time talks to the family's Screen time server on the home network.</string>
-</dict></plist>
-EOF
-run_as_builder codesign --force -s - "$agent_app"
+here="$(cd "$(dirname "$0")" && pwd)"
+if [ -d "$here/ScreenTimeAgent.app" ] && [ -d "$here/ScreenTimeMenu.app" ]; then
+  # A release download: the apps come built. Downloads are quarantined; these are ad-hoc signed.
+  out="$here"
+  xattr -dr com.apple.quarantine "$out/ScreenTimeAgent.app" "$out/ScreenTimeMenu.app" 2>/dev/null || true
+else
+  echo "Building..."
+  run_as_builder() { if [ "$system" = 1 ] && [ "$build_user" != root ]; then sudo -u "$build_user" -H "$@"; else "$@"; fi; }
+  cargo="$(run_as_builder bash -lc 'command -v cargo || echo ~/.cargo/bin/cargo')"
+  out="$root/target/macos-dist"
+  run_as_builder env CARGO="$cargo" OUT="$out" "$root/crates/macos/build.sh"
+fi
 
 echo "Installing into $data..."
 uid_gui=""
