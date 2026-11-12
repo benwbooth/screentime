@@ -51,7 +51,7 @@
           # The Leptos UI, compiled to WebAssembly.
           web = pkgs.rustPlatform.buildRustPackage {
             pname = "screentime-web";
-            version = "0.1.0";
+            version = "1.0.0";
             src = pkgs.lib.cleanSource ./.;
             inherit cargoDeps;
             nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.lld pkgs.rsync ];
@@ -70,7 +70,7 @@
 
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "screentime";
-            version = "0.1.0";
+            version = "1.0.0";
             src = pkgs.lib.cleanSource ./.;
             inherit cargoDeps;
             nativeBuildInputs = [ pkgs.mold pkgs.rsync ];
