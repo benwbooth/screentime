@@ -17,6 +17,16 @@ downtime schedules, and kids asking for more time with a notification on your ph
 | `crates/windows` | Windows client: a service (same agent as Linux) and a tray app with the warning toast. |
 | `crates/common` | Shared types. |
 
+## Downloads
+
+Each [release](https://github.com/benwbooth/screentime/releases) has prebuilt builds:
+`screentime-linux-x86_64.tar.gz` / `-aarch64` (server, client daemon, PAM module, greeter and web UI;
+the server finds the web UI in `share/screentime/web` next to `bin`), `screentime-windows.zip`
+(see below) and `screentime-macos.zip` (unzip, then run `install.sh` from it the same way as from a
+checkout; the apps are already built). The server is also an image:
+`docker pull ghcr.io/benwbooth/screentime:latest` (data in `/data`, port 8443).
+Pushing a `v*` tag builds and publishes a release (`.github/workflows/release.yml`).
+
 ## Windows
 
 Build the installer zip from Linux with `crates/windows/build-windows.sh` (MinGW from nixpkgs);

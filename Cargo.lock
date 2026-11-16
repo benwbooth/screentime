@@ -2568,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "pam_screentime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "libc",
  "screentime-common",
@@ -3413,7 +3413,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screentime-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3436,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "screentime-common"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "serde",
@@ -3445,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "screentime-credprov"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "embed-resource",
  "screentime-common",
@@ -3456,7 +3456,7 @@ dependencies = [
 
 [[package]]
 name = "screentime-greeter"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "greetd_ipc",
@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "screentime-macos"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -3480,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "screentime-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3515,7 +3515,7 @@ dependencies = [
 
 [[package]]
 name = "screentime-web"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "screentime-windows"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
