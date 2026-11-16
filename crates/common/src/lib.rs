@@ -96,6 +96,10 @@ pub struct Policy {
     /// off time a parent approved at this computer.
     #[serde(default)]
     pub taken_minutes: u32,
+    /// A parent pressed "Lock now": lock the kid's sessions once, acknowledge this id, and don't
+    /// keep them locked. Sent only for a couple of minutes and until this computer acknowledges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_lock: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +318,7 @@ mod tests {
             daily_allowance_minutes: Some(120),
             bonus_minutes: 30,
             taken_minutes: 0,
+            quick_lock: None,
             downtime: vec![DowntimeWindow {
                 days: vec![Sun, Mon, Tue, Wed, Thu],
                 start: t("21:00"),

@@ -357,6 +357,7 @@ pub async fn policy_for(db: &SqlitePool, user: i64, username: &str, host: &str, 
         downtime: downtime(db, user).await?,
         locked: is_locked(db, user, host).await?,
         taken_minutes: taken,
+        quick_lock: pending_quick_lock(db, user, host).await?,
     })
 }
 
@@ -390,6 +391,57 @@ pub async fn set_lock(db: &SqlitePool, user: i64, host: &str, locked: bool) -> R
     } else {
         sqlx::query("DELETE FROM locks WHERE user_id = ? AND host = ?").bind(user).bind(host).execute(db).await?;
     }
+    Ok(())
+}
+
+/// How long a quick lock waits for a computer to pick it up. One that was off or offline longer
+/// than this never locks for it.
+pub const QUICK_LOCK_TTL_SECS: i64 = 120;
+
+/// Ask `host` (or every computer with '*') to lock the kid's sessions once. Returns its id.
+pub async fn create_quick_lock(db: &SqlitePool, user: i64, host: &str) -> Result<i64> {
+    let now = Utc::now().timestamp();
+    // Old ones are of no use to anyone; their acknowledgements go with them.
+    sqlx::query("DELETE FROM quick_locks WHERE created_at < ?").bind(now - 86_400).execute(db).await?;
+    Ok(sqlx::query_scalar("INSERT INTO quick_locks (user_id, host, created_at) VALUES (?, ?, ?) RETURNING id")
+        .bind(user)
+        .bind(host)
+        .bind(now)
+        .fetch_one(db)
+        .await?)
+}
+
+/// The newest quick lock `host` hasn't acknowledged yet for this kid, if it's still fresh.
+pub async fn pending_quick_lock(db: &SqlitePool, user: i64, host: &str) -> Result<Option<i64>> {
+    if host.is_empty() {
+        return Ok(None);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT q.id FROM quick_locks q WHERE q.user_id = ? AND (q.host = '*' OR q.host = ?) AND q.created_at >= ?
+         AND NOT EXISTS (SELECT 1 FROM quick_lock_acks a WHERE a.quick_lock_id = q.id AND a.host = ?)
+         ORDER BY q.id DESC LIMIT 1",
+    )
+    .bind(user)
+    .bind(host)
+    .bind(Utc::now().timestamp() - QUICK_LOCK_TTL_SECS)
+    .bind(host)
+    .fetch_optional(db)
+    .await?)
+}
+
+/// `host` has carried out the quick lock (or there was nothing to lock), so stop sending it.
+/// Acknowledging this one also settles any older ones for the same kid.
+pub async fn ack_quick_lock(db: &SqlitePool, user: i64, host: &str, id: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO quick_lock_acks (quick_lock_id, host)
+         SELECT id, ? FROM quick_locks WHERE user_id = ? AND id <= ? AND (host = '*' OR host = ?)",
+    )
+    .bind(host)
+    .bind(user)
+    .bind(id)
+    .bind(host)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

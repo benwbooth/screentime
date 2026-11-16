@@ -62,6 +62,13 @@ impl ServerApi {
         Ok(())
     }
 
+    /// Tell the server this computer has carried out quick lock `id` for `user`.
+    pub async fn ack_quick_lock(&self, user: &str, id: i64) -> Result<()> {
+        let url = format!("{}/api/client/quick-lock/{user}/{id}", self.base);
+        self.auth(self.http.post(&url)).send().await?.error_for_status()?;
+        Ok(())
+    }
+
     pub async fn request_time(&self, request: &TimeRequest) -> Result<()> {
         let url = format!("{}/api/client/requests", self.base);
         self.auth(self.http.post(&url)).json(request).send().await?.error_for_status()?;

@@ -16,6 +16,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/client/usage", post(usage))
         .route("/api/client/requests", post(request_time))
         .route("/api/client/accounts", post(accounts))
+        .route("/api/client/quick-lock/{username}/{id}", post(ack_quick_lock))
 }
 
 /// Linux user names: a lowercase letter or underscore, then up to 31 of `[a-z0-9_-]`.
@@ -37,6 +38,19 @@ async fn policy(State(s): State<AppState>, client: Client, Path(username): Path<
     let user = db::ensure_user(&s.db, &username, s.config.default_allowance_minutes).await?;
     let today = Local::now().date_naive();
     Ok(Json(db::policy_for(&s.db, user, &username, &client.hostname, today).await?))
+}
+
+/// The computer has locked the kid's sessions for a quick lock (or found none to lock).
+async fn ack_quick_lock(
+    State(s): State<AppState>,
+    client: Client,
+    Path((username, id)): Path<(String, i64)>,
+) -> AppResult<StatusCode> {
+    check_username(&username)?;
+    let user = db::user_id(&s.db, &username).await?.ok_or(AppError::NotFound)?;
+    db::ack_quick_lock(&s.db, user, &client.hostname, id).await?;
+    tracing::info!(user = %username, host = %client.hostname, id, "quick lock done");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn usage(State(s): State<AppState>, client: Client, Json(report): Json<UsageReport>) -> AppResult<StatusCode> {

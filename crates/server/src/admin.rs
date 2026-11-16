@@ -33,6 +33,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/users/{username}/downtime", put(set_downtime))
         .route("/api/users/{username}/bonus", post(add_bonus))
         .route("/api/users/{username}/lock", put(set_lock))
+        .route("/api/users/{username}/quick-lock", post(quick_lock))
         .route("/api/requests", get(requests))
         .route("/api/requests/{id}/resolve", post(resolve_request))
         .route("/api/clients", get(clients).post(add_client))
@@ -313,6 +314,33 @@ async fn set_lock(
     db::set_lock(&s.db, id, &host, body.locked).await?;
     s.wifi.poke();
     tracing::info!(user = %username, computer = %host, locked = body.locked, "lock changed from web");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct QuickLockBody {
+    /// A computer's hostname, or None for all computers.
+    computer: Option<String>,
+}
+
+/// Lock the kid's screens once, without keeping them locked: they can sign back in as usual.
+async fn quick_lock(
+    State(s): State<AppState>,
+    _: Admin,
+    Path(username): Path<String>,
+    Json(body): Json<QuickLockBody>,
+) -> AppResult<StatusCode> {
+    if username == crate::wifi::USER {
+        return Err(AppError::BadRequest("the Wi-Fi has no screen to lock".into()));
+    }
+    let id = find_user(&s, &username).await?;
+    let host = match &body.computer {
+        Some(h) if db::list_clients(&s.db).await?.iter().any(|c| c.hostname.eq_ignore_ascii_case(h)) => h.clone(),
+        Some(_) => return Err(AppError::NotFound),
+        None => "*".to_owned(),
+    };
+    let lock = db::create_quick_lock(&s.db, id, &host).await?;
+    tracing::info!(user = %username, computer = %host, id = lock, "quick lock from web");
     Ok(StatusCode::NO_CONTENT)
 }
 

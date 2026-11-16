@@ -640,6 +640,16 @@ fn KidCard(
         }
     };
     let lock_all = lock.clone();
+    let quick_lock = {
+        let (username, shown) = (username.clone(), shown.clone());
+        move |computer: Option<String>| {
+            let (username, shown) = (username.clone(), shown.clone());
+            let where_ = computer.clone().unwrap_or_else(|| "all computers".into());
+            let done = format!("Locked {shown}'s screen on {where_} (once)");
+            ctx.act(done, async move { api::quick_lock(&username, computer.as_deref()).await })
+        }
+    };
+    let quick_lock_all = quick_lock.clone();
     view! {
         <article class="card kid" class:wifi=is_wifi>
             <div class="kid-head">
@@ -659,7 +669,7 @@ fn KidCard(
             <MinutePicker on_pick=add/>
             <div class="label spaced">"Take time away"</div>
             <MinutePicker on_pick=take minus=true/>
-            <div class="label spaced">"Lock"</div>
+            <div class="label spaced">"Keep locked"</div>
             <div class="picker">
                 <button class="chip lock" class:active=locked_all
                     on:click=move |_| lock_all(None, !locked_all)>
@@ -686,6 +696,22 @@ fn KidCard(
                     }).collect_view()
                 })}
             </div>
+            {(!is_wifi && !locked_all).then(|| view! {
+                <div class="label spaced" title="Locks the screen once. Unlocking it again works as usual; nothing is kept locked and no time is taken.">"Quick lock"</div>
+                <div class="picker">
+                    <button class="chip" on:click=move |_| quick_lock_all(None)>"All computers"</button>
+                    {move || {
+                        let quick_lock = quick_lock.clone();
+                        computers().into_iter().map(move |c| {
+                            let quick_lock = quick_lock.clone();
+                            let host = c.hostname.clone();
+                            view! {
+                                <button class="chip" on:click=move |_| quick_lock(Some(host.clone()))>{c.hostname}</button>
+                            }
+                        }).collect_view()
+                    }}
+                </div>
+            })}
             {wifi_controls}
         </article>
     }

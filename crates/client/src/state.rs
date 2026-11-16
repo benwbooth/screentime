@@ -150,6 +150,7 @@ impl State {
                 downtime: Vec::new(),
                 locked: false,
                 taken_minutes: 0,
+                quick_lock: None,
             }),
         };
         let override_until = self.local_grants.get(user).and_then(|g| g.override_until);

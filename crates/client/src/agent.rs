@@ -124,6 +124,9 @@ pub struct Agent<P: Platform> {
     /// How far this machine's clock is behind the server's. Setting the PC's clock back (in
     /// the BIOS, say) doesn't buy time while the server is reachable.
     clock_offset: std::sync::Mutex<TimeDelta>,
+    /// The last quick lock carried out for each kid (server username), so a quick lock whose
+    /// acknowledgement didn't reach the server isn't carried out again.
+    quick_locks_done: Mutex<HashMap<String, i64>>,
 }
 
 /// After an out-of-time sign-in is sent back to the sign-in screen, how long until it's ended.
@@ -183,6 +186,7 @@ impl<P: Platform> Agent<P> {
             synced_once: std::sync::atomic::AtomicBool::new(config_has_no_server),
             wake: tokio::sync::Notify::new(),
             clock_offset: std::sync::Mutex::new(offset),
+            quick_locks_done: Mutex::default(),
         }))
     }
 
@@ -420,6 +424,9 @@ impl<P: Platform> Agent<P> {
                         if let Some(t) = server_time {
                             self.note_server_time(t);
                         }
+                        if let Some(id) = p.quick_lock {
+                            self.quick_lock(api, server_user, id).await;
+                        }
                         let old = self.state.lock().await.policies.insert(user.clone(), p.clone());
                         // Act on a lock, added time or taken time now rather than at the next tick.
                         if old.as_ref() != Some(&p) {
@@ -461,6 +468,44 @@ impl<P: Platform> Agent<P> {
             drop(state);
             self.synced_once.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Carry out a parent's quick lock and acknowledge it to the server.
+    async fn quick_lock(&self, api: &ServerApi, kid: &str, id: i64) {
+        if !self.carry_out_quick_lock(kid, id).await {
+            return;
+        }
+        if let Err(e) = api.ack_quick_lock(kid, id).await {
+            tracing::warn!(kid, id, "acknowledging the quick lock failed: {e:#}");
+        }
+    }
+
+    /// Lock every unlocked session of the kid's accounts once. Nothing keeps them locked:
+    /// unlocking again works as usual, and usage and the kid's limits are untouched. False when
+    /// the sessions couldn't be listed, to try again at the next sync while the server offers it.
+    async fn carry_out_quick_lock(&self, kid: &str, id: i64) -> bool {
+        if self.quick_locks_done.lock().await.get(kid).is_some_and(|done| *done >= id) {
+            return true;
+        }
+        let sessions = match self.platform.sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(kid, "listing sessions for a quick lock failed: {e:#}");
+                return false;
+            }
+        };
+        let mine: Vec<&Session> = sessions
+            .iter()
+            .filter(|s| !s.locked && self.managed_name(&s.user).is_some_and(|u| self.server_name(&u) == kid))
+            .collect();
+        tracing::info!(kid, id, sessions = mine.len(), "quick lock");
+        for s in mine {
+            if let Err(e) = self.platform.lock(s).await {
+                tracing::warn!(kid, session = %s.id, "quick lock failed: {e:#}");
+            }
+        }
+        self.quick_locks_done.lock().await.insert(kid.to_owned(), id);
+        true
     }
 
     /// Serve one client of the local socket or pipe: JSON lines in, JSON lines out.
@@ -641,11 +686,12 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         log: std::sync::Mutex<Vec<String>>,
+        sessions: std::sync::Mutex<Vec<Session>>,
     }
 
     impl Platform for Fake {
         async fn sessions(&self) -> Result<Vec<Session>> {
-            Ok(Vec::new())
+            Ok(self.sessions.lock().unwrap().clone())
         }
         async fn lock(&self, s: &Session) -> Result<()> {
             self.log.lock().unwrap().push(format!("lock {}", s.id));
@@ -712,6 +758,29 @@ mod tests {
         assert_eq!(*a.platform.log.lock().unwrap(), ["lock 1"; 4]);
     }
 
+    #[tokio::test]
+    async fn a_quick_lock_locks_once_and_is_not_repeated() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = agent(dir.path(), Duration::from_secs(120));
+        *a.platform.sessions.lock().unwrap() = vec![
+            Session { id: "1".into(), user: "kid".into(), in_use: true, locked: false },
+            Session { id: "2".into(), user: "kid".into(), in_use: false, locked: true },
+            Session { id: "3".into(), user: "someone".into(), in_use: true, locked: false },
+        ];
+        assert!(a.carry_out_quick_lock("kid", 7).await);
+        assert_eq!(*a.platform.log.lock().unwrap(), ["lock 1"]);
+        // Offered again (the acknowledgement was lost) or an older one: not locked again.
+        assert!(a.carry_out_quick_lock("kid", 7).await);
+        assert!(a.carry_out_quick_lock("kid", 6).await);
+        assert_eq!(*a.platform.log.lock().unwrap(), ["lock 1"]);
+        // Unlocked and still allowed: nothing re-locks it.
+        a.enforce("kid", &session(), OK).await;
+        assert_eq!(*a.platform.log.lock().unwrap(), ["lock 1"]);
+        // A new one locks again.
+        assert!(a.carry_out_quick_lock("kid", 8).await);
+        assert_eq!(*a.platform.log.lock().unwrap(), ["lock 1", "lock 1"]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn no_time_can_be_approved_while_locked() {
         use argon2::password_hash::{PasswordHasher, SaltString};
@@ -730,6 +799,7 @@ mod tests {
                 downtime: Vec::new(),
                 locked: true,
                 taken_minutes: 0,
+                quick_lock: None,
             };
             state.policies.insert("kid".into(), policy);
         }

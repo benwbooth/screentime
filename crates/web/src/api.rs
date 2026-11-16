@@ -293,6 +293,13 @@ pub async fn set_account(hostname: &str, account: &str, kid: Option<&str>) -> Ap
     send("PUT", &format!("/api/clients/{hostname}/accounts/{account}"), &serde_json::json!({ "kid": kid })).await.map(drop)
 }
 
+/// Lock the kid's screens once without keeping them locked, on one computer or all with `None`.
+pub async fn quick_lock(username: &str, computer: Option<&str>) -> ApiResult<()> {
+    send("POST", &format!("/api/users/{username}/quick-lock"), &serde_json::json!({ "computer": computer }))
+        .await
+        .map(drop)
+}
+
 /// Lock or unlock a kid on one computer, or on all of them with `None`.
 pub async fn set_lock(username: &str, computer: Option<&str>, locked: bool) -> ApiResult<()> {
     send("PUT", &format!("/api/users/{username}/lock"), &serde_json::json!({ "computer": computer, "locked": locked }))

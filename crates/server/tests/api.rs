@@ -563,6 +563,46 @@ async fn parents_can_lock_and_take_time_away() {
 }
 
 #[tokio::test]
+async fn a_quick_lock_is_offered_once_per_computer_and_expires() {
+    let s = server(with_password()).await;
+    let pc1 = db::add_client(&s.state.db, "Ryan-PC").await.unwrap();
+    let pc2 = db::add_client(&s.state.db, "Chloe-PC").await.unwrap();
+    let cookie = s.admin_cookie().await;
+    let me = Some(cookie.as_str());
+    s.call("POST", "/api/users", me, Some(json!({"username": "ryan"}))).await;
+    assert_eq!(s.policy(&pc1, "ryan").await.quick_lock, None);
+
+    // One computer: only it sees it, and it's not a lasting lock.
+    let one = json!({"computer": "Ryan-PC"});
+    assert_eq!(s.call("POST", "/api/users/ryan/quick-lock", me, Some(one)).await.0, StatusCode::NO_CONTENT);
+    let p = s.policy(&pc1, "ryan").await;
+    let id = p.quick_lock.expect("offered to Ryan-PC");
+    assert!(!p.locked);
+    assert_eq!(s.policy(&pc2, "ryan").await.quick_lock, None);
+    // Until it says it's done.
+    let ack = format!("/api/client/quick-lock/ryan/{id}");
+    assert_eq!(s.call("POST", &ack, Some(&pc1), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(s.policy(&pc1, "ryan").await.quick_lock, None);
+
+    // All computers: each acknowledges for itself.
+    s.call("POST", "/api/users/ryan/quick-lock", me, Some(json!({"computer": null}))).await;
+    let id = s.policy(&pc1, "ryan").await.quick_lock.unwrap();
+    assert_eq!(s.policy(&pc2, "ryan").await.quick_lock, Some(id));
+    s.call("POST", &format!("/api/client/quick-lock/ryan/{id}"), Some(&pc2), None).await;
+    assert_eq!(s.policy(&pc2, "ryan").await.quick_lock, None);
+    assert_eq!(s.policy(&pc1, "ryan").await.quick_lock, Some(id));
+
+    // A computer that was off past the window never gets it.
+    sqlx::query("UPDATE quick_locks SET created_at = created_at - ?").bind(db::QUICK_LOCK_TTL_SECS + 1).execute(&s.state.db).await.unwrap();
+    assert_eq!(s.policy(&pc1, "ryan").await.quick_lock, None);
+
+    // Unknown computers and the Wi-Fi are refused.
+    let bad = json!({"computer": "Nope-PC"});
+    assert_eq!(s.call("POST", "/api/users/ryan/quick-lock", me, Some(bad)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(s.call("POST", "/api/users/wifi/quick-lock", me, Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn the_web_password_approves_time_at_the_computers() {
     let s = server(with_password()).await;
     let pc1 = db::add_client(&s.state.db, "Ryan-PC").await.unwrap();
