@@ -3,18 +3,12 @@
 #   screentime-windows.zip           Windows service, tray app, sign-in tile, install.ps1
 #   screentime-macos.zip             Mac agent + menu-bar app (universal), install.sh
 # and pushes the server image to ghcr.io/<owner>/screentime:<version> and :latest.
-# Pull requests that touch the build run the same jobs without publishing anything.
+# Running it by hand (workflow_dispatch) builds everything without publishing anything.
 name: release
 
 on:
   push:
     tags: ["v*"]
-  pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - "crates/macos/build.sh"
-      - "crates/windows/build-windows.sh"
-      - "flake.nix"
   workflow_dispatch:
 
 permissions:
@@ -76,7 +70,7 @@ jobs:
           path: target/windows-dist/screentime-windows.zip
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
